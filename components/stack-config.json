@@ -1,0 +1,730 @@
+#!/bin/bash
+
+# ANSI color codes
+NOCOLOR='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+
+# Global counters for summary
+TOTAL_TESTS=0
+PASSED_TESTS=0
+FAILED_TESTS=0
+
+echo "========================================"
+echo "-- Kubernetes Stack Validation"
+echo "========================================"
+
+# Function to increment test counters
+increment_test() {
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+}
+
+increment_passed() {
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+}
+
+increment_failed() {
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+}
+
+{%- set all_components = {} -%}
+
+{%- if cookiecutter.get('default_context') and cookiecutter.default_context.get('components') and cookiecutter.default_context.components != "" %}
+{%- set all_components = cookiecutter.default_context.components -%}
+{%- elif cookiecutter.get('components') and cookiecutter.components != "" %}
+{%- set all_components = cookiecutter.components -%}
+{%- elif cookiecutter.get('component') %}
+{%- set all_components = {cookiecutter.component.name: cookiecutter.component} -%}
+{%- endif %}
+
+{%- if all_components %}
+{%- for component_name, component in all_components.items() %}
+
+{%- if component.type == "cert_manager" %}
+#################### Cert-Manager ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+COMPONENT_LABELS=("app.kubernetes.io/name=cert-manager" "app.kubernetes.io/name=cainjector" "app.kubernetes.io/name=webhook")
+
+echo "-----------------------------------------------"
+echo "-- Start testing Cert-Manager: {{ component_name }}"
+echo "-----------------------------------------------"
+
+for LABEL in "${COMPONENT_LABELS[@]}"; do
+  increment_test
+  COMPONENT=$(echo $LABEL | cut -d '=' -f 2)
+  echo "Checking if the $COMPONENT pod is running..."
+  POD_STATUS=$(kubectl get pods -l $LABEL -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+  if [ "$POD_STATUS" == "Running" ]; then
+    echo -e "${GREEN}$COMPONENT pod is running.${NOCOLOR}"
+    increment_passed
+  else
+    echo -e "${RED}$COMPONENT pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+    increment_failed
+  fi
+done
+
+increment_test
+echo "Checking for the existence of cluster issuers..."
+if kubectl get clusterissuers &>/dev/null; then
+  echo -e "${GREEN}Found cluster issuers.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}No cluster issuers found.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Cert-Manager validation completed.${NOCOLOR}"
+
+{%- elif component.type == "grafana" %}
+#################### Grafana ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+{%- if component.attributes.get('admin_password') %}
+ADMIN_PASSWORD="{{ component.attributes.admin_password }}"
+{%- endif %}
+GRAFANA_HOST="${SVC_NAME}.${NAMESPACE}.svc.cluster.local"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Grafana: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Grafana pod is running..."
+POD_STATUS=$(kubectl get pods -l app.kubernetes.io/name=grafana -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Grafana pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Grafana pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Testing Grafana connectivity..."
+TEMP_POD="curlpod-$(date +%s)"
+if kubectl run $TEMP_POD --image=curlimages/curl --restart=Never --rm -i --tty=false --namespace $NAMESPACE -- /bin/sh -c "
+  curl -s --max-time 10 'http://$GRAFANA_HOST:3000/api/health' > /dev/null && echo 'SUCCESS'
+" 2>/dev/null | grep -q "SUCCESS"; then
+  echo -e "${GREEN}Grafana connectivity test passed.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${YELLOW}Grafana connectivity test completed (may not be accessible).${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Grafana service validation completed.${NOCOLOR}"
+
+{%- elif component.type == "apisix" %}
+#################### APISIX ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing APISIX: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking APISIX pods..."
+pod_status=$(kubectl get pods -l app.kubernetes.io/name=apisix -n $NAMESPACE --field-selector=status.phase=Running --output=jsonpath='{.items[*].status.phase}' 2>/dev/null)
+
+if [ -n "$pod_status" ]; then
+  echo -e "${GREEN}APISIX pods are running${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}APISIX pods are not running${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking APISIX service..."
+SERVICE_STATUS=$(kubectl get svc -n $NAMESPACE -l app.kubernetes.io/name=apisix -o jsonpath="{.items[0].spec.clusterIP}" 2>/dev/null)
+if [ -n "$SERVICE_STATUS" ] && [ "$SERVICE_STATUS" != "<none>" ]; then
+  echo -e "${GREEN}APISIX service is available at IP: $SERVICE_STATUS${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}APISIX service is not available${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}APISIX validation completed.${NOCOLOR}"
+
+{%- elif component.type == "minio" %}
+#################### MinIO ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing MinIO: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the MinIO pod is running..."
+POD_STATUS=$(kubectl get pod -l app.kubernetes.io/name=$SVC_NAME -n $NAMESPACE -o jsonpath="{.items[0].status.phase}" 2>/dev/null)
+if [[ $POD_STATUS == "Running" ]]; then
+  echo -e "${GREEN}MinIO pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}MinIO pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking if the MinIO service is accessible..."
+SVC_CLUSTER_IP=$(kubectl get svc $SVC_NAME -n $NAMESPACE -o=jsonpath='{.spec.clusterIP}' 2>/dev/null)
+if [ "$SVC_CLUSTER_IP" != "<none>" ] && [ ! -z "$SVC_CLUSTER_IP" ]; then
+  echo -e "${GREEN}MinIO service is accessible at ClusterIP: $SVC_CLUSTER_IP${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}MinIO service is not accessible.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}MinIO validation completed.${NOCOLOR}"
+
+{%- elif component.type == "mongodb" %}
+#################### MongoDB ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SERVICE_NAME="{{ component.name }}"
+MONGODB_HOST="${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local"
+
+echo "-----------------------------------------------"
+echo "-- Start testing MongoDB: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the MongoDB pod is running..."
+POD_STATUS=$(kubectl get pods -l app.kubernetes.io/name=mongodb -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}MongoDB pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}MongoDB pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking if the MongoDB service is accessible..."
+SVC_CLUSTER_IP=$(kubectl get svc $SERVICE_NAME -n $NAMESPACE -o=jsonpath='{.spec.clusterIP}' 2>/dev/null)
+if [ "$SVC_CLUSTER_IP" != "<none>" ] && [ ! -z "$SVC_CLUSTER_IP" ]; then
+  echo -e "${GREEN}MongoDB service is accessible at ClusterIP: $SVC_CLUSTER_IP${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}MongoDB service is not accessible.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}MongoDB validation completed.${NOCOLOR}"
+
+{%- elif component.type == "external_source_code" %}
+#################### Application ({{ component_name }}) #####################
+
+COMPONENT_NAME="{{ component.name }}"
+NAMESPACE="{{ component.attributes.namespace }}"
+SERVICE_IP="${COMPONENT_NAME}.${NAMESPACE}.svc.cluster.local"
+PORT="{{ component.attributes.port }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing {{ component_name }}"
+echo "-----------------------------------------------"
+
+check_url_call () {
+  echo "Checking url $1"
+  http_response=$(curl --silent --output /dev/null --write-out "%{http_code}" --location --max-time 10 $1 2>/dev/null)
+  if [ $http_response == "200" ]; then
+      echo -e "${GREEN}Success for $1 (HTTP $http_response)${NOCOLOR}"
+      return 0
+  else
+      echo -e "${YELLOW}Got response $http_response for $1${NOCOLOR}"
+      return 1
+  fi
+}
+
+increment_test
+POD_STATUS=$(kubectl get pods -l app=$COMPONENT_NAME -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}$COMPONENT_NAME pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}$COMPONENT_NAME pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+if check_url_call "http://$SERVICE_IP:$PORT"; then
+  increment_passed
+else
+  increment_failed
+fi
+
+echo -e "${GREEN}$COMPONENT_NAME service validation completed.${NOCOLOR}"
+
+{%- elif component.type == "cnpg" %}
+#################### PostgreSQL ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+POSTGRES_HOST="${SVC_NAME}.${NAMESPACE}.svc.cluster.local"
+
+echo "-----------------------------------------------"
+echo "-- Start testing PostgreSQL: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the PostgreSQL pod is running..."
+POD_STATUS=$(kubectl get pods -l postgresql -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}PostgreSQL pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}PostgreSQL pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking if the PostgreSQL service is accessible..."
+SVC_CLUSTER_IP=$(kubectl get svc $SVC_NAME -n $NAMESPACE -o=jsonpath='{.spec.clusterIP}' 2>/dev/null)
+if [ "$SVC_CLUSTER_IP" != "<none>" ] && [ ! -z "$SVC_CLUSTER_IP" ]; then
+  echo -e "${GREEN}PostgreSQL service is accessible at ClusterIP: $SVC_CLUSTER_IP${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}PostgreSQL service is not accessible.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}PostgreSQL validation completed.${NOCOLOR}"
+
+{%- elif component.type == "prometheus" %}
+#################### Prometheus ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+RELEASE_NAME="{{ component.name }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Prometheus: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking Prometheus pods..."
+POD_COUNT=$(kubectl get pods -n $NAMESPACE -l "app.kubernetes.io/name=prometheus" --field-selector=status.phase=Running -o name 2>/dev/null | wc -l)
+if [ $POD_COUNT -gt 0 ]; then
+  echo -e "${GREEN}Prometheus pods are running (Count: $POD_COUNT).${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}No Prometheus pods are running.${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking Prometheus service..."
+if kubectl get svc -n $NAMESPACE -l "app.kubernetes.io/name=prometheus" &>/dev/null; then
+  echo -e "${GREEN}Prometheus service is available.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Prometheus service is not available.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Prometheus service validation completed.${NOCOLOR}"
+
+{%- elif component.type == "kafka" %}
+#################### Kafka ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Kafka: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking Kafka broker pods..."
+KAFKA_PODS=$(kubectl get pods -n $NAMESPACE -l strimzi.io/kind=Kafka --field-selector=status.phase=Running -o name 2>/dev/null | wc -l)
+if [ $KAFKA_PODS -gt 0 ]; then
+  echo -e "${GREEN}Kafka broker pods are running (Count: $KAFKA_PODS).${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}No Kafka broker pods are running.${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking Kafka service..."
+if kubectl get svc -n $NAMESPACE -l strimzi.io/kind=Kafka &>/dev/null; then
+  echo -e "${GREEN}Kafka service is available.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Kafka service is not available.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Kafka validation completed.${NOCOLOR}"
+
+{%- elif component.type == "redis" %}
+#################### Redis ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Redis: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Redis pod is running..."
+POD_STATUS=$(kubectl get pods -l app.kubernetes.io/name=redis -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Redis pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Redis pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking if the Redis service is accessible..."
+SVC_CLUSTER_IP=$(kubectl get svc $SVC_NAME -n $NAMESPACE -o=jsonpath='{.spec.clusterIP}' 2>/dev/null)
+if [ "$SVC_CLUSTER_IP" != "<none>" ] && [ ! -z "$SVC_CLUSTER_IP" ]; then
+  echo -e "${GREEN}Redis service is accessible at ClusterIP: $SVC_CLUSTER_IP${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Redis service is not accessible.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Redis validation completed.${NOCOLOR}"
+
+{%- elif component.type == "loki" %}
+#################### Loki ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Loki: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Loki pod is running..."
+POD_STATUS=$(kubectl get pods -l app.kubernetes.io/name=loki -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Loki pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Loki pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Loki validation completed.${NOCOLOR}"
+
+{%- elif component.type == "velero" %}
+#################### Velero ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Velero: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Velero pod is running..."
+POD_STATUS=$(kubectl get pods -l app.kubernetes.io/name=velero -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Velero pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Velero pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Velero validation completed.${NOCOLOR}"
+
+{%- elif component.type == "flowise" %}
+#################### Flowise ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+PORT="{{ component.attributes.port }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Flowise: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Flowise pod is running..."
+POD_STATUS=$(kubectl get pods -l app=$SVC_NAME -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Flowise pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Flowise pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+SERVICE_IP="${SVC_NAME}.${NAMESPACE}.svc.cluster.local"
+echo "Checking Flowise service accessibility..."
+if curl --silent --output /dev/null --max-time 10 "http://$SERVICE_IP:$PORT" 2>/dev/null; then
+  echo -e "${GREEN}Flowise service is accessible.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${YELLOW}Flowise service connectivity test completed (may not be accessible).${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Flowise validation completed.${NOCOLOR}"
+
+{%- elif component.type == "validator" %}
+#################### Validator ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+PORT="{{ component.attributes.port }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Validator: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Validator pod is running..."
+POD_STATUS=$(kubectl get pods -l app=$SVC_NAME -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Validator pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Validator pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking if the Validator service is accessible..."
+SVC_CLUSTER_IP=$(kubectl get svc $SVC_NAME -n $NAMESPACE -o=jsonpath='{.spec.clusterIP}' 2>/dev/null)
+if [ "$SVC_CLUSTER_IP" != "<none>" ] && [ ! -z "$SVC_CLUSTER_IP" ]; then
+  echo -e "${GREEN}Validator service is accessible at ClusterIP: $SVC_CLUSTER_IP${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Validator service is not accessible.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Validator validation completed.${NOCOLOR}"
+
+{%- elif component.type == "opa" %}
+#################### OPA/Gatekeeper ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing OPA/Gatekeeper: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Gatekeeper controller pods are running..."
+CONTROLLER_COUNT=$(kubectl get pods -l app=gatekeeper-controller-manager -n $NAMESPACE --field-selector=status.phase=Running -o name 2>/dev/null | wc -l)
+if [ $CONTROLLER_COUNT -gt 0 ]; then
+  echo -e "${GREEN}Gatekeeper controller pods are running (Count: $CONTROLLER_COUNT).${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Gatekeeper controller pods are not running.${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking if the Gatekeeper audit pod is running..."
+AUDIT_STATUS=$(kubectl get pods -l app=gatekeeper-audit -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$AUDIT_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Gatekeeper audit pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Gatekeeper audit pod is not running. Current status: $AUDIT_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking Gatekeeper validating admission webhook..."
+if kubectl get validatingadmissionwebhooks.admissionregistration.k8s.io -o name 2>/dev/null | grep -q gatekeeper; then
+  echo -e "${GREEN}Gatekeeper validating admission webhook configured.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${YELLOW}Gatekeeper validating admission webhook not found.${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking Gatekeeper mutating admission webhook..."
+if kubectl get mutatingadmissionwebhooks.admissionregistration.k8s.io -o name 2>/dev/null | grep -q gatekeeper; then
+  echo -e "${GREEN}Gatekeeper mutating admission webhook configured.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${YELLOW}Gatekeeper mutating admission webhook not found.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}OPA/Gatekeeper validation completed.${NOCOLOR}"
+
+{%- elif component.type == "qdrant" %}
+#################### Qdrant ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Qdrant: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Qdrant pod is running..."
+POD_STATUS=$(kubectl get pods -l app=$SVC_NAME -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Qdrant pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Qdrant pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Qdrant validation completed.${NOCOLOR}"
+
+{%- elif component.type == "llama" %}
+#################### Llama ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+PORT="{{ component.attributes.port }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Llama: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Llama pod is running..."
+POD_STATUS=$(kubectl get pods -l app=$SVC_NAME -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Llama pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Llama pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Llama validation completed.${NOCOLOR}"
+
+{%- elif component.type == "image_base" %}
+#################### Image Base ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+PORT="{{ component.attributes.port }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Image Base: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Image Base pod is running..."
+POD_STATUS=$(kubectl get pods -l app=$SVC_NAME -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$POD_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Image Base pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Image Base pod is not running. Current status: $POD_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Image Base validation completed.${NOCOLOR}"
+
+{%- elif component.type == "keycloak_operator" %}
+#################### Keycloak ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace }}"
+SVC_NAME="{{ component.name }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing Keycloak: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if the Keycloak server pod is running..."
+KC_SERVER_STATUS=$(kubectl get pods -l app=keycloak -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$KC_SERVER_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Keycloak server pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Keycloak server pod is not running. Current status: $KC_SERVER_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+increment_test
+echo "Checking if the Keycloak operator pod is running..."
+KC_OP_STATUS=$(kubectl get pods -l app.kubernetes.io/name=keycloak-operator -n $NAMESPACE -o=jsonpath='{.items[0].status.phase}' 2>/dev/null)
+if [ "$KC_OP_STATUS" == "Running" ]; then
+  echo -e "${GREEN}Keycloak operator pod is running.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${RED}Keycloak operator pod is not running. Current status: $KC_OP_STATUS${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Keycloak validation completed.${NOCOLOR}"
+
+{%- else %}
+#################### Generic Component ({{ component_name }}) #####################
+
+NAMESPACE="{{ component.attributes.namespace if component.get('attributes') else 'default' }}"
+COMPONENT_TYPE="{{ component.type }}"
+
+echo "-----------------------------------------------"
+echo "-- Start testing {{ component.type }}: {{ component_name }}"
+echo "-----------------------------------------------"
+
+increment_test
+echo "Checking if pods are running in namespace $NAMESPACE..."
+POD_COUNT=$(kubectl get pods -n $NAMESPACE --field-selector=status.phase=Running -o name 2>/dev/null | wc -l)
+if [ $POD_COUNT -gt 0 ]; then
+  echo -e "${GREEN}Found $POD_COUNT running pods in namespace $NAMESPACE.${NOCOLOR}"
+  increment_passed
+else
+  echo -e "${YELLOW}No running pods found in namespace $NAMESPACE.${NOCOLOR}"
+  increment_failed
+fi
+
+echo -e "${GREEN}Generic component validation completed.${NOCOLOR}"
+
+{%- endif %}
+
+{%- endfor %}
+
+{%- else %}
+
+#################### No Components Configured #####################
+
+echo "-----------------------------------------------"
+echo "-- No components to validate"
+echo "-----------------------------------------------"
+
+echo -e "${YELLOW}No components are configured${NOCOLOR}"
+echo "Neither 'components' collection nor single 'component' found."
+
+{%- endif %}
+
+echo "========================================"
+echo "-- Kubernetes Stack Validation Complete"
+echo "========================================"
+
+# Print summary
+echo ""
+echo "=============== SUMMARY ==============="
+echo -e "Total Tests: ${YELLOW}$TOTAL_TESTS${NOCOLOR}"
+echo -e "Passed: ${GREEN}$PASSED_TESTS${NOCOLOR}"
+echo -e "Failed: ${RED}$FAILED_TESTS${NOCOLOR}"
+
+if [ $FAILED_TESTS -eq 0 ]; then
+  echo -e "${GREEN}All tests passed! ✅${NOCOLOR}"
+  exit 0
+else
+  echo -e "${RED}Some tests failed! ❌${NOCOLOR}"
+  exit 1
+fi
