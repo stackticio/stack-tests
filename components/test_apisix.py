@@ -50,9 +50,9 @@ def test_apisix_health() -> List[Dict]:
     return [{
         "name": "apisix_gateway_health",
         "description": "Test APISIX gateway health endpoint",
-        "passed": passed,
+        "status": passed,
         "output": output,
-        "severity": "HIGH" if not passed else "LOW"
+        "severity": "CRITICAL" if not passed else "INFO"
     }]
 
 
@@ -76,9 +76,9 @@ def test_apisix_admin_connectivity() -> List[Dict]:
     return [{
         "name": "apisix_admin_connectivity",
         "description": "Test APISIX Admin API connectivity",
-        "passed": passed,
+        "status": passed,
         "output": output,
-        "severity": "MEDIUM" if not passed else "LOW"
+        "severity": "WARNING" if not passed else "INFO"
     }]
 
 
@@ -124,9 +124,9 @@ def test_routes() -> List[Dict]:
         results.append({
             "name": "apisix_route_discovery",
             "description": "Discover APISIX routes",
-            "passed": False,
+            "status": False,
             "output": "No routes found to test",
-            "severity": "HIGH"
+            "severity": "CRITICAL"
         })
         return results
     
@@ -134,9 +134,9 @@ def test_routes() -> List[Dict]:
     results.append({
         "name": "apisix_route_discovery",
         "description": "Discover APISIX routes",
-        "passed": True,
+        "status": True,
         "output": f"Found {len(routes)} routes to test",
-        "severity": "LOW"
+        "severity": "INFO"
     })
     
     for route in routes:
@@ -180,9 +180,9 @@ def apisix_route_http_connectivity(route: Dict) -> Dict:
     return {
         "name": f"apisix_{route_name}_http_connectivity",
         "description": f"Test HTTP connectivity for route {route_name} ({host})",
-        "passed": passed,
+        "status": passed,
         "output": output,
-        "severity": "MEDIUM" if not passed else "LOW"
+        "severity": "WARNING" if not passed else "INFO"
     }
 
 
@@ -219,9 +219,9 @@ def apisix_route_https_connectivity(route: Dict) -> Dict:
     return {
         "name": f"apisix_{route_name}_https_connectivity",
         "description": f"Test HTTPS connectivity for route {route_name} ({host})",
-        "passed": passed,
+        "status": passed,
         "output": output,
-        "severity": "MEDIUM" if not passed else "LOW"
+        "severity": "WARNING" if not passed else "INFO"
     }
 
 
@@ -236,7 +236,7 @@ def apisix_route_ssl_certificate(route: Dict) -> Dict:
     
     passed = False
     output = f"SSL certificate check failed for {host}"
-    severity = "MEDIUM"
+    severity = "WARNING"
     
     if result['exit_code'] == 0 and 'notAfter' in result['stdout']:
         # Extract expiry date
@@ -251,19 +251,19 @@ def apisix_route_ssl_certificate(route: Dict) -> Dict:
                     if days_until_expiry > 30:
                         passed = True
                         output = f"SSL certificate valid for {host} (Expires: {expiry_str}, {days_until_expiry} days remaining)"
-                        severity = "LOW"
+                        severity = "INFO"
                     elif days_until_expiry > 0:
                         passed = True
                         output = f"SSL certificate expiring soon for {host} (Expires: {expiry_str}, {days_until_expiry} days remaining)"
-                        severity = "MEDIUM"
+                        severity = "WARNING"
                     else:
                         output = f"SSL certificate expired for {host} (Expired: {expiry_str})"
-                        severity = "HIGH"
+                        severity = "CRITICAL"
                 except:
                     # If date parsing fails, just check if we got a certificate
                     passed = True
                     output = f"SSL certificate valid for {host} (Expires: {expiry_str})"
-                    severity = "LOW"
+                    severity = "INFO"
                 break
     else:
         # Try alternative verification using curl
@@ -273,7 +273,7 @@ def apisix_route_ssl_certificate(route: Dict) -> Dict:
         if verify_result['stdout'] == '0':
             passed = True
             output = f"SSL certificate verification passed for {host}"
-            severity = "LOW"
+            severity = "INFO"
         else:
             # Check if HTTPS works at all (even with invalid cert)
             https_command = f"curl -k -I -s -o /dev/null -w '%{{http_code}}' https://{host}/"
@@ -282,12 +282,12 @@ def apisix_route_ssl_certificate(route: Dict) -> Dict:
             if https_result['stdout'] and https_result['stdout'][0] in ['2', '3', '4']:
                 passed = True
                 output = f"SSL certificate present but may have issues for {host} (verify code: {verify_result.get('stdout', 'unknown')})"
-                severity = "MEDIUM"
+                severity = "WARNING"
     
     return {
         "name": f"apisix_{route_name}_ssl_certificate",
         "description": f"Test SSL certificate for route {route_name} ({host})",
-        "passed": passed,
+        "status": passed,
         "output": output,
         "severity": severity
     }
@@ -355,9 +355,9 @@ def test_apisix_pods() -> List[Dict]:
     return [{
         "name": "apisix_pods_status",
         "description": "Check APISIX pod status",
-        "passed": passed,
+        "status": passed,
         "output": output,
-        "severity": "HIGH" if not passed else "LOW"
+        "severity": "CRITICAL" if not passed else "INFO"
     }]
 
 
@@ -423,7 +423,7 @@ def test_apisix_logs() -> List[Dict]:
                         warning_count += 1
             
             passed = error_count == 0
-            severity = "LOW" if passed else ("MEDIUM" if error_count < 10 else "HIGH")
+            severity = "INFO" if passed else ("WARNING" if error_count < 10 else "CRITICAL")
             
             if error_count > 0:
                 output = f"Found {error_count} errors in last {time_window}"
@@ -437,7 +437,7 @@ def test_apisix_logs() -> List[Dict]:
             results.append({
                 "name": f"apisix_logs_{pod_name}",
                 "description": f"Check APISIX logs for errors in {pod_name}",
-                "passed": passed,
+                "status": passed,
                 "output": output,
                 "severity": severity
             })
@@ -445,9 +445,9 @@ def test_apisix_logs() -> List[Dict]:
         results.append({
             "name": "apisix_logs_check",
             "description": "Check APISIX logs for errors",
-            "passed": False,
+            "status": False,
             "output": "No APISIX pods found to check logs",
-            "severity": "MEDIUM"
+            "severity": "WARNING"
         })
     
     return results
@@ -480,9 +480,9 @@ def test_apisix_route_count() -> List[Dict]:
     return [{
         "name": "apisix_route_count",
         "description": "Count total APISIX routes",
-        "passed": passed,
+        "status": passed,
         "output": output,
-        "severity": "HIGH" if not passed else "LOW"
+        "severity": "CRITICAL" if not passed else "INFO"
     }]
 
 
@@ -515,9 +515,9 @@ def test_apisix_upstreams() -> List[Dict]:
     return [{
         "name": "apisix_upstreams",
         "description": "Check APISIX upstreams status",
-        "passed": passed,
+        "status": passed,
         "output": output,
-        "severity": "LOW"
+        "severity": "INFO"
     }]
 
 
@@ -549,9 +549,9 @@ def test_apisix_plugins() -> List[Dict]:
     return [{
         "name": "apisix_plugins",
         "description": "List enabled APISIX plugins",
-        "passed": passed,
+        "status": passed,
         "output": output,
-        "severity": "LOW"
+        "severity": "INFO"
     }]
 
 
@@ -584,9 +584,9 @@ def test_apisix_certificates() -> List[Dict]:
     return [{
         "name": "apisix_certificates",
         "description": "Check APISIX SSL certificates",
-        "passed": passed,
+        "status": passed,
         "output": output,
-        "severity": "LOW"
+        "severity": "INFO"
     }]
 
 
