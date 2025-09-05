@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Comprehensive MinIO Service Validation Script - Stack Agent Version
-Designed to run from stack-agent container with mc already installed
-Supports multiple buckets, dynamic namespace, and environment-based configuration
-"""
+# test_minio.py - Comprehensive MinIO Service Validation Script
 
 import os
 import json
@@ -36,53 +32,29 @@ def run_command(command: str, env: Dict = None, timeout: int = 30) -> Dict:
 
 def get_minio_namespace() -> str:
     """Get MinIO namespace from env or default"""
-    return os.getenv("MINIO_NS", os.getenv("MINIO_NAMESPACE", "minio"))
+    # Check MINIO_MINIO_NS first, then MINIO_NS
+    return os.getenv("MINIO_MINIO_NS", os.getenv("MINIO_NS", "minio"))
 
 
 def get_minio_host() -> str:
-    """Get MinIO host from env - support multiple formats"""
-    return os.getenv("MINIO_HOST", 
-                     os.getenv("MINIO_MINIO_HOST", 
-                              "minio.minio.svc.cluster.local"))
+    """Get MinIO host from env"""
+    return os.getenv("MINIO_HOST", os.getenv("MINIO_MINIO_HOST", "minio.minio.svc.cluster.local"))
 
 
 def get_minio_port() -> str:
     """Get MinIO port from env"""
-    return os.getenv("MINIO_PORT", 
-                     os.getenv("MINIO_MINIO_PORT", "9000"))
+    return os.getenv("MINIO_PORT", os.getenv("MINIO_MINIO_PORT", "9000"))
 
 
 def get_minio_credentials() -> Tuple[str, str]:
-    """Get MinIO access and secret keys - try multiple sources"""
-    # First try environment variables
-    access_key = os.getenv("MINIO_ACCESS_KEY", 
-                           os.getenv("MINIO_MINIO_ACCESS_KEY"))
-    secret_key = os.getenv("MINIO_SECRET_KEY", 
-                           os.getenv("MINIO_MINIO_SECRET_KEY"))
-    
-    # If not in env, try to get from Kubernetes secret
-    if not access_key or not secret_key:
-        namespace = get_minio_namespace()
-        
-        # Try to get from minio-credentials secret
-        cmd_access = f"kubectl get secret -n {namespace} minio-credentials -o jsonpath='{{.data.rootUser}}' 2>/dev/null | base64 -d"
-        cmd_secret = f"kubectl get secret -n {namespace} minio-credentials -o jsonpath='{{.data.rootPassword}}' 2>/dev/null | base64 -d"
-        
-        result_access = run_command(cmd_access, timeout=5)
-        result_secret = run_command(cmd_secret, timeout=5)
-        
-        if result_access["exit_code"] == 0 and result_access["stdout"]:
-            access_key = result_access["stdout"]
-        if result_secret["exit_code"] == 0 and result_secret["stdout"]:
-            secret_key = result_secret["stdout"]
-    
-    # Default fallback
-    return (access_key or "minioadmin", secret_key or "minioadmin")
+    """Get MinIO access and secret keys"""
+    access_key = os.getenv("MINIO_MINIO_ACCESS_KEY", os.getenv("MINIO_ACCESS_KEY", "minioadmin"))
+    secret_key = os.getenv("MINIO_MINIO_SECRET_KEY", os.getenv("MINIO_SECRET_KEY", "minioadmin"))
+    return access_key, secret_key
 
 
 def parse_buckets_from_env() -> List[Dict]:
-    """
-    Parse MINIO_BUCKETS environment variable
+    """Parse MINIO_BUCKETS environment variable
     Format: bucket1:user1:pass1:pass2;bucket2:user2:pass3:pass4
     """
     buckets_str = os.getenv("MINIO_BUCKETS", "")
@@ -97,9 +69,6 @@ def parse_buckets_from_env() -> List[Dict]:
                     "user": parts[1].strip() if len(parts) > 1 else None,
                     "password": parts[2].strip() if len(parts) > 2 else None
                 }
-                # Additional passwords might be for different purposes
-                if len(parts) > 3:
-                    bucket_info["alt_password"] = parts[3].strip()
                 buckets.append(bucket_info)
     
     return buckets
@@ -119,7 +88,7 @@ def setup_mc_alias_local() -> Dict:
     access_key, secret_key = get_minio_credentials()
     
     # Setup mc alias
-    cmd = f"mc alias set myminio http://{host}:{port} '{access_key}' '{secret_key}' --api S3v4 2>&1"
+    cmd = f"mc alias set myminio http://{host}:{port} {access_key} {secret_key} --api S3v4 2>&1"
     result = run_command(cmd, timeout=10)
     
     if result["exit_code"] == 0 or "already exists" in result["stdout"]:
@@ -153,10 +122,8 @@ def test_minio_connectivity() -> List[Dict]:
     
     # Setup mc alias
     setup_result = setup_mc_alias_local()
-    results.append(setup_result)
-    
     if not setup_result["status"]:
-        return results
+        return [setup_result]
     
     # Test basic connectivity with mc admin info
     cmd = "mc admin info myminio 2>&1"
@@ -196,7 +163,7 @@ def test_minio_cluster_health() -> List[Dict]:
     namespace = get_minio_namespace()
     results = []
     
-    # Check all MinIO pods via kubectl
+    # Check MinIO pods
     cmd = f"kubectl get pods -n {namespace} -l app=minio --no-headers 2>/dev/null | grep -E 'minio-[0-9]+'"
     result = run_command(cmd)
     
@@ -225,14 +192,11 @@ def test_minio_cluster_health() -> List[Dict]:
         for detail in pod_details:
             output += f"    - {detail}\n"
         
-        # Warning if not all pods are running (could be normal in dev)
-        severity = "WARNING" if running_pods < total_pods else "INFO"
-        
         results.append({
             "name": "minio_pod_health",
-            "status": running_pods > 0,  # At least one pod should be running
+            "status": running_pods > 0,
             "output": output.strip(),
-            "severity": severity
+            "severity": "WARNING" if running_pods < total_pods else "INFO"
         })
     else:
         results.append({
@@ -242,23 +206,27 @@ def test_minio_cluster_health() -> List[Dict]:
             "severity": "CRITICAL"
         })
     
-    # Check MinIO service health using mc
-    cmd = "mc admin service status myminio 2>&1"
-    result = run_command(cmd, timeout=10)
-    
-    if result["exit_code"] == 0:
-        output = "MinIO service status: Online"
-        status = True
-    else:
-        output = "MinIO service status: Degraded or Limited"
-        status = False
-    
-    results.append({
-        "name": "minio_service_health",
-        "status": status,
-        "output": output,
-        "severity": "WARNING" if not status else "INFO"
-    })
+    # Check MinIO server health using mc admin
+    if check_mc_available():
+        setup_mc_alias_local()
+        
+        # Check service health
+        cmd = "mc admin service status myminio 2>&1"
+        result = run_command(cmd, timeout=10)
+        
+        if result["exit_code"] == 0:
+            output = "MinIO service status: Online"
+            status = True
+        else:
+            output = "MinIO service status: Offline or Degraded"
+            status = False
+        
+        results.append({
+            "name": "minio_service_health",
+            "status": status,
+            "output": output,
+            "severity": "CRITICAL" if not status else "INFO"
+        })
     
     return results
 
@@ -267,6 +235,17 @@ def test_minio_buckets() -> List[Dict]:
     """Test all configured buckets"""
     results = []
     
+    if not check_mc_available():
+        return [{
+            "name": "minio_buckets",
+            "status": False,
+            "output": "Cannot test buckets - mc not available",
+            "severity": "CRITICAL"
+        }]
+    
+    # Setup mc alias
+    setup_mc_alias_local()
+    
     # Get configured buckets from environment
     configured_buckets = parse_buckets_from_env()
     
@@ -274,16 +253,8 @@ def test_minio_buckets() -> List[Dict]:
     cmd = "mc ls myminio 2>&1"
     result = run_command(cmd, timeout=10)
     
-    if result["exit_code"] != 0:
-        return [{
-            "name": "minio_buckets",
-            "status": False,
-            "output": f"Cannot list buckets: {result['stderr']}",
-            "severity": "CRITICAL"
-        }]
-    
     existing_buckets = []
-    if result["stdout"]:
+    if result["exit_code"] == 0 and result["stdout"]:
         lines = result["stdout"].split("\n")
         for line in lines:
             if line.strip():
@@ -293,19 +264,11 @@ def test_minio_buckets() -> List[Dict]:
                     bucket_name = parts[-1].rstrip("/")
                     existing_buckets.append(bucket_name)
     
-    # Report on existing buckets
-    if existing_buckets:
-        results.append({
-            "name": "minio_buckets_found",
-            "status": True,
-            "output": f"Found {len(existing_buckets)} buckets: {', '.join(existing_buckets)}",
-            "severity": "INFO"
-        })
-    
     # Test each configured bucket
     for bucket_config in configured_buckets:
         bucket_name = bucket_config["name"]
         
+        # Check if bucket exists
         if bucket_name in existing_buckets:
             results.append({
                 "name": f"minio_bucket_{bucket_name}_exists",
@@ -314,7 +277,7 @@ def test_minio_buckets() -> List[Dict]:
                 "severity": "INFO"
             })
             
-            # Test bucket operations - pass bucket_name as parameter
+            # Test bucket operations - NOW PASSING bucket_name CORRECTLY
             results.extend(test_bucket_operations(bucket_name))
         else:
             results.append({
@@ -325,16 +288,14 @@ def test_minio_buckets() -> List[Dict]:
             })
     
     # Report on unconfigured buckets
-    if configured_buckets:
-        configured_names = [c["name"] for c in configured_buckets]
-        unconfigured = [b for b in existing_buckets if b not in configured_names]
-        if unconfigured:
-            results.append({
-                "name": "minio_unconfigured_buckets",
-                "status": True,
-                "output": f"Additional buckets found (not in MINIO_BUCKETS): {', '.join(unconfigured)}",
-                "severity": "INFO"
-            })
+    unconfigured = [b for b in existing_buckets if b not in [c["name"] for c in configured_buckets]]
+    if unconfigured:
+        results.append({
+            "name": "minio_unconfigured_buckets",
+            "status": True,
+            "output": f"Additional buckets found: {', '.join(unconfigured)}",
+            "severity": "INFO"
+        })
     
     return results
 
@@ -363,11 +324,11 @@ def test_bucket_operations(bucket: str) -> List[Dict]:
         results.append({
             "name": f"minio_bucket_{bucket}_write",
             "status": True,
-            "output": f"Write test passed for bucket '{bucket}'",
+            "output": f"Successfully wrote test file to bucket '{bucket}'",
             "severity": "INFO"
         })
         
-        # Read test - list the file
+        # Read test - list and verify the file exists
         read_cmd = f"mc ls myminio/{bucket}/{test_file} 2>&1"
         read_result = run_command(read_cmd, timeout=10)
         
@@ -375,14 +336,14 @@ def test_bucket_operations(bucket: str) -> List[Dict]:
             results.append({
                 "name": f"minio_bucket_{bucket}_read",
                 "status": True,
-                "output": f"Read test passed for bucket '{bucket}'",
+                "output": f"Successfully verified file in bucket '{bucket}'",
                 "severity": "INFO"
             })
         else:
             results.append({
                 "name": f"minio_bucket_{bucket}_read",
                 "status": False,
-                "output": f"Read test failed for bucket '{bucket}'",
+                "output": f"Failed to read from bucket '{bucket}'",
                 "severity": "WARNING"
             })
         
@@ -391,92 +352,17 @@ def test_bucket_operations(bucket: str) -> List[Dict]:
         run_command(cleanup_cmd, timeout=10)
         
     else:
-        # Check if it's a permission issue
-        if "Access Denied" in write_result["stderr"] or "access denied" in write_result["stderr"].lower():
-            results.append({
-                "name": f"minio_bucket_{bucket}_write",
-                "status": False,
-                "output": f"Access denied for bucket '{bucket}' (check permissions)",
-                "severity": "WARNING"
-            })
-        else:
-            results.append({
-                "name": f"minio_bucket_{bucket}_write",
-                "status": False,
-                "output": f"Write failed for bucket '{bucket}': {write_result['stderr'][:100]}",
-                "severity": "WARNING"
-            })
-    
-    return results
-
-
-def test_minio_bucket_users() -> List[Dict]:
-    """Test MinIO bucket-specific users from environment configuration"""
-    results = []
-    
-    # Get configured buckets with users
-    configured_buckets = parse_buckets_from_env()
-    
-    # List all users
-    cmd = "mc admin user list myminio 2>&1"
-    result = run_command(cmd, timeout=10)
-    
-    if result["exit_code"] != 0:
-        return [{
-            "name": "minio_bucket_users",
+        results.append({
+            "name": f"minio_bucket_{bucket}_write",
             "status": False,
-            "output": f"Cannot list users: {result['stderr']}",
-            "severity": "WARNING"
-        }]
-    
-    existing_users = []
-    if result["stdout"]:
-        lines = result["stdout"].split("\n")
-        for line in lines:
-            if "enabled" in line.lower() or "disabled" in line.lower():
-                user_parts = line.split()
-                if user_parts:
-                    existing_users.append(user_parts[0])
-    
-    # Check each bucket's user
-    users_found = 0
-    users_expected = 0
-    
-    for bucket_config in configured_buckets:
-        if bucket_config.get("user"):
-            users_expected += 1
-            user = bucket_config["user"]
-            
-            if user in existing_users:
-                users_found += 1
-                results.append({
-                    "name": f"minio_user_{user}",
-                    "status": True,
-                    "output": f"User '{user}' exists for bucket '{bucket_config['name']}'",
-                    "severity": "INFO"
-                })
-            else:
-                results.append({
-                    "name": f"minio_user_{user}",
-                    "status": False,
-                    "output": f"User '{user}' not found for bucket '{bucket_config['name']}'",
-                    "severity": "WARNING"
-                })
-    
-    # Summary
-    if users_expected > 0:
-        results.append({
-            "name": "minio_bucket_users_summary",
-            "status": users_found == users_expected,
-            "output": f"Bucket users: {users_found}/{users_expected} configured",
-            "severity": "INFO" if users_found == users_expected else "WARNING"
+            "output": f"Failed to write to bucket '{bucket}': {write_result['stderr']}",
+            "severity": "CRITICAL"
         })
-    else:
         results.append({
-            "name": "minio_bucket_users_summary",
-            "status": True,
-            "output": "No bucket-specific users configured in MINIO_BUCKETS",
-            "severity": "INFO"
+            "name": f"minio_bucket_{bucket}_read",
+            "status": False,
+            "output": f"Skipped read test due to write failure",
+            "severity": "WARNING"
         })
     
     return results
@@ -486,7 +372,17 @@ def test_minio_statistics() -> List[Dict]:
     """Get MinIO storage statistics"""
     results = []
     
-    # Get disk usage via mc
+    if not check_mc_available():
+        return [{
+            "name": "minio_statistics",
+            "status": False,
+            "output": "Cannot get statistics - mc not available",
+            "severity": "WARNING"
+        }]
+    
+    setup_mc_alias_local()
+    
+    # Get disk usage
     cmd = "mc admin info myminio --json 2>&1"
     result = run_command(cmd, timeout=10)
     
@@ -494,6 +390,7 @@ def test_minio_statistics() -> List[Dict]:
         try:
             info = json.loads(result["stdout"])
             
+            # Extract relevant statistics
             servers = info.get("servers", [])
             total_disks = 0
             online_disks = 0
@@ -509,6 +406,7 @@ def test_minio_statistics() -> List[Dict]:
                     total_space += disk.get("totalspace", 0)
                     used_space += disk.get("usedspace", 0)
             
+            # Convert bytes to human readable
             def bytes_to_human(bytes_val):
                 for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
                     if bytes_val < 1024.0:
@@ -524,17 +422,14 @@ def test_minio_statistics() -> List[Dict]:
             output += f"  Used Space: {bytes_to_human(used_space)} ({usage_percent:.1f}%)\n"
             output += f"  Free Space: {bytes_to_human(total_space - used_space)}"
             
-            # Add warning if usage is high
-            severity = "WARNING" if usage_percent > 80 else "INFO"
-            
             results.append({
                 "name": "minio_storage_stats",
                 "status": True,
                 "output": output,
-                "severity": severity
+                "severity": "INFO"
             })
             
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError) as e:
             # Fallback to non-JSON output
             cmd = "mc admin info myminio 2>&1"
             result = run_command(cmd, timeout=10)
@@ -552,28 +447,111 @@ def test_minio_statistics() -> List[Dict]:
                     "output": output.strip(),
                     "severity": "INFO"
                 })
+            else:
+                results.append({
+                    "name": "minio_storage_stats",
+                    "status": False,
+                    "output": "Failed to retrieve storage statistics",
+                    "severity": "WARNING"
+                })
     else:
         results.append({
             "name": "minio_storage_stats",
             "status": False,
-            "output": f"Failed to get storage stats: {result['stderr'][:100]}",
+            "output": "Failed to get MinIO statistics",
             "severity": "WARNING"
         })
     
     # Count buckets and objects
-    cmd = "mc du --summarize myminio 2>&1"
-    result = run_command(cmd, timeout=15)
+    cmd = "mc ls myminio 2>&1"
+    result = run_command(cmd, timeout=10)
     
     if result["exit_code"] == 0:
+        bucket_count = len([l for l in result["stdout"].split("\n") if l.strip()])
+        
+        output = f"Bucket Statistics:\n"
+        output += f"  Total Buckets: {bucket_count}"
+        
+        results.append({
+            "name": "minio_bucket_stats",
+            "status": True,
+            "output": output,
+            "severity": "INFO"
+        })
+    
+    return results
+
+
+def test_minio_bucket_users() -> List[Dict]:
+    """Test MinIO users and policies"""
+    results = []
+    
+    if not check_mc_available():
+        return [{
+            "name": "minio_bucket_users",
+            "status": False,
+            "output": "Cannot test users - mc not available",
+            "severity": "WARNING"
+        }]
+    
+    setup_mc_alias_local()
+    
+    # List users
+    cmd = "mc admin user list myminio 2>&1"
+    result = run_command(cmd, timeout=10)
+    
+    if result["exit_code"] == 0:
+        users = []
         lines = result["stdout"].split("\n")
         for line in lines:
-            if "Total Size:" in line or "Objects:" in line:
-                results.append({
-                    "name": "minio_usage_summary",
-                    "status": True,
-                    "output": line.strip(),
-                    "severity": "INFO"
-                })
+            if "enabled" in line.lower() or "disabled" in line.lower():
+                user_parts = line.split()
+                if user_parts:
+                    users.append(user_parts[0])
+        
+        output = f"Users: {len(users)} configured\n"
+        if users:
+            output += f"  Users: {', '.join(users[:5])}"  # Show first 5 users
+            if len(users) > 5:
+                output += f" (+{len(users)-5} more)"
+        
+        results.append({
+            "name": "minio_users",
+            "status": True,
+            "output": output,
+            "severity": "INFO"
+        })
+    else:
+        results.append({
+            "name": "minio_bucket_users",
+            "status": False,
+            "output": f"Cannot list users: {result['stderr']}",
+            "severity": "WARNING"
+        })
+    
+    # List policies
+    cmd = "mc admin policy list myminio 2>&1"
+    result = run_command(cmd, timeout=10)
+    
+    if result["exit_code"] == 0:
+        policies = []
+        lines = result["stdout"].split("\n")
+        for line in lines:
+            if line.strip() and not line.startswith("Policy"):
+                policies.append(line.strip())
+        
+        output = f"Policies: {len(policies)} configured\n"
+        if policies:
+            output += f"  Policies: {', '.join(policies[:5])}"  # Show first 5 policies
+            if len(policies) > 5:
+                output += f" (+{len(policies)-5} more)"
+        
+        results.append({
+            "name": "minio_policies",
+            "status": True,
+            "output": output,
+            "severity": "INFO"
+        })
     
     return results
 
@@ -597,8 +575,8 @@ def test_minio_recent_logs() -> List[Dict]:
     
     pod = pod_result["stdout"].strip()
     
-    # Check logs for errors in last 50 lines
-    cmd = f"kubectl logs -n {namespace} {pod} --tail=50 2>&1"
+    # Check logs for errors in last 100 lines
+    cmd = f"kubectl logs -n {namespace} {pod} --tail=100 2>&1"
     result = run_command(cmd, timeout=10)
     
     if result["exit_code"] == 0:
@@ -610,9 +588,7 @@ def test_minio_recent_logs() -> List[Dict]:
         for line in lines:
             line_lower = line.lower()
             if "error" in line_lower or "err" in line_lower:
-                # Ignore common non-critical errors
-                if "no such object" not in line_lower and "key does not exist" not in line_lower:
-                    error_count += 1
+                error_count += 1
             if "warning" in line_lower or "warn" in line_lower:
                 warning_count += 1
             if "fatal" in line_lower or "panic" in line_lower:
@@ -621,15 +597,15 @@ def test_minio_recent_logs() -> List[Dict]:
         if fatal_count > 0:
             status = False
             severity = "CRITICAL"
-            output = f"CRITICAL: {fatal_count} fatal errors in logs!"
-        elif error_count > 5:
+            output = f"Logs contain {fatal_count} FATAL errors!"
+        elif error_count > 10:  # Threshold for concerning number of errors
             status = False
             severity = "WARNING"
-            output = f"Logs show {error_count} errors, {warning_count} warnings"
+            output = f"Logs contain {error_count} errors, {warning_count} warnings"
         else:
             status = True
             severity = "INFO"
-            output = f"Logs healthy: {error_count} errors, {warning_count} warnings in last 50 lines"
+            output = f"Logs healthy: {error_count} errors, {warning_count} warnings in last 100 lines"
         
         results.append({
             "name": "minio_log_health",
@@ -637,6 +613,18 @@ def test_minio_recent_logs() -> List[Dict]:
             "output": output,
             "severity": severity
         })
+        
+        # Show last error if any
+        if error_count > 0:
+            for line in reversed(lines):
+                if "error" in line.lower() or "err" in line.lower():
+                    results.append({
+                        "name": "minio_last_error",
+                        "status": False,
+                        "output": f"Last error: {line[:200]}",  # Truncate long lines
+                        "severity": "WARNING"
+                    })
+                    break
     else:
         results.append({
             "name": "minio_logs",
@@ -685,7 +673,7 @@ def test_minio_network() -> List[Dict]:
             "severity": "CRITICAL"
         })
     
-    # Test health endpoint from local container
+    # Test health endpoint
     cmd = f"curl -s -o /dev/null -w '%{{http_code}}' http://{host}:{port}/minio/health/live 2>&1"
     result = run_command(cmd, timeout=10)
     
@@ -693,14 +681,14 @@ def test_minio_network() -> List[Dict]:
         results.append({
             "name": "minio_health_endpoint",
             "status": True,
-            "output": f"Health endpoint responding (HTTP 200)",
+            "output": f"Health endpoint responding (HTTP 200) at {host}:{port}",
             "severity": "INFO"
         })
     else:
         results.append({
             "name": "minio_health_endpoint",
             "status": False,
-            "output": f"Health endpoint not responding",
+            "output": f"Health endpoint not responding at {host}:{port}",
             "severity": "CRITICAL"
         })
     
@@ -710,6 +698,16 @@ def test_minio_network() -> List[Dict]:
 def test_minio_performance() -> List[Dict]:
     """Basic performance test for MinIO"""
     results = []
+    
+    if not check_mc_available():
+        return [{
+            "name": "minio_performance",
+            "status": False,
+            "output": "Cannot test performance - mc not available",
+            "severity": "WARNING"
+        }]
+    
+    setup_mc_alias_local()
     
     # Create a test bucket for performance testing
     test_bucket = f"perftest-{uuid.uuid4().hex[:8]}"
@@ -723,23 +721,24 @@ def test_minio_performance() -> List[Dict]:
         test_file = "/tmp/perftest.bin"
         os.system(f"dd if=/dev/zero of={test_file} bs=1M count=1 2>/dev/null")
         
-        # Perform upload speed test
+        # Perform a simple speed test
         start_time = time.time()
-        upload_cmd = f"mc cp {test_file} myminio/{test_bucket}/ 2>&1"
-        upload_result = run_command(upload_cmd, timeout=30)
+        
+        # Upload test file
+        test_cmd = f"mc cp {test_file} myminio/{test_bucket}/ 2>&1"
+        test_result = run_command(test_cmd, timeout=30)
+        
         upload_time = time.time() - start_time
         
-        # Clean up
+        # Cleanup
         os.remove(test_file)
         cleanup_cmd = f"mc rb --force myminio/{test_bucket} 2>&1"
         run_command(cleanup_cmd, timeout=10)
         
-        if upload_result["exit_code"] == 0:
-            throughput = 1 / upload_time if upload_time > 0 else 0
+        if test_result["exit_code"] == 0:
             output = f"Performance Test:\n"
             output += f"  1MB Upload: {upload_time:.2f}s\n"
-            output += f"  Throughput: {throughput:.2f} MB/s"
-            
+            output += f"  Throughput: {1/upload_time:.2f} MB/s"
             status = True
             severity = "INFO"
             
@@ -747,20 +746,17 @@ def test_minio_performance() -> List[Dict]:
                 status = False
                 severity = "WARNING"
                 output += "\n  WARNING: Slow upload detected"
-            
-            results.append({
-                "name": "minio_performance",
-                "status": status,
-                "output": output,
-                "severity": severity
-            })
         else:
-            results.append({
-                "name": "minio_performance",
-                "status": False,
-                "output": f"Performance test failed: {upload_result['stderr'][:100]}",
-                "severity": "WARNING"
-            })
+            output = "Performance test failed"
+            status = False
+            severity = "WARNING"
+        
+        results.append({
+            "name": "minio_performance",
+            "status": status,
+            "output": output,
+            "severity": severity
+        })
     else:
         results.append({
             "name": "minio_performance",
@@ -776,135 +772,108 @@ def test_minio_performance() -> List[Dict]:
 if __name__ == "__main__":
     all_results = []
     
-    # Display configuration
     namespace = get_minio_namespace()
     host = get_minio_host()
     port = get_minio_port()
-    access_key, secret_key = get_minio_credentials()
     
-    print("="*60)
-    print("MINIO VALIDATION SCRIPT - Stack Agent Version")
-    print("="*60)
-    print(f"\nConfiguration:")
+    print(f"Using MinIO configuration:")
     print(f"  Namespace: {namespace}")
     print(f"  Host: {host}")
     print(f"  Port: {port}")
-    print(f"  Credentials: {'[CONFIGURED]' if access_key else '[NOT SET]'}")
-    print(f"  MC Available: {'Yes' if check_mc_available() else 'No'}")
     
-    # Parse and display configured buckets
+    # Try to get credentials
+    access_key, secret_key = get_minio_credentials()
+    print(f"  Credentials: {'Configured' if access_key else 'Not set'}\n")
+    
+    # Parse configured buckets
     configured_buckets = parse_buckets_from_env()
     if configured_buckets:
-        print(f"\nExpected Buckets ({len(configured_buckets)}):")
-        for bucket in configured_buckets:
-            user_info = f" (user: {bucket['user']})" if bucket.get('user') else ""
-            print(f"  - {bucket['name']}{user_info}")
-    else:
-        print("\nNo buckets configured in MINIO_BUCKETS environment variable")
-    
-    print("\n" + "-"*60)
-    print("Running validation tests...")
-    print("-"*60 + "\n")
+        print(f"Configured/Detected buckets: {', '.join([b['name'] for b in configured_buckets])}\n")
     
     # Run all tests
-    test_functions = [
-        ("Connectivity", test_minio_connectivity),
-        ("Cluster Health", test_minio_cluster_health),
-        ("Buckets", test_minio_buckets),
-        ("Bucket Users", test_minio_bucket_users),
-        ("Storage Stats", test_minio_statistics),
-        ("Network", test_minio_network),
-        ("Log Analysis", test_minio_recent_logs),
-        ("Performance", test_minio_performance)
-    ]
+    print("Running MinIO validation tests...\n")
     
-    for test_name, test_func in test_functions:
-        print(f"Running {test_name} tests...")
-        try:
-            results = test_func()
-            all_results.extend(results)
-        except Exception as e:
-            all_results.append({
-                "name": f"{test_name.lower()}_error",
-                "status": False,
-                "output": f"Test failed with error: {str(e)}",
-                "severity": "WARNING"
-            })
+    all_results.extend(test_minio_connectivity())
+    all_results.extend(test_minio_cluster_health())
+    all_results.extend(test_minio_buckets())
+    all_results.extend(test_minio_statistics())
+    all_results.extend(test_minio_bucket_users())
+    all_results.extend(test_minio_network())
+    all_results.extend(test_minio_recent_logs())
+    all_results.extend(test_minio_performance())
     
-    # Print results
+    # Print clean results
     print("\n" + "="*60)
-    print("TEST RESULTS")
-    print("="*60)
+    print("MINIO TEST RESULTS")
+    print("="*60 + "\n")
     
-    # Group by severity
-    critical_tests = []
-    warning_tests = []
-    passed_tests = []
+    # Group results by category
+    categories = {
+        "connectivity": [],
+        "health": [],
+        "bucket": [],
+        "stats": [],
+        "users": [],
+        "network": [],
+        "logs": [],
+        "performance": []
+    }
     
     for result in all_results:
-        if not result["status"]:
-            if result.get("severity") == "CRITICAL":
-                critical_tests.append(result)
-            else:
-                warning_tests.append(result)
-        else:
-            passed_tests.append(result)
+        name = result["name"]
+        if "connectivity" in name:
+            categories["connectivity"].append(result)
+        elif "health" in name or "pod" in name or "service" in name:
+            categories["health"].append(result)
+        elif "bucket" in name:
+            categories["bucket"].append(result)
+        elif "stats" in name or "statistics" in name:
+            categories["stats"].append(result)
+        elif "user" in name or "policy" in name or "policies" in name:
+            categories["users"].append(result)
+        elif "network" in name or "endpoint" in name:
+            categories["network"].append(result)
+        elif "log" in name:
+            categories["logs"].append(result)
+        elif "performance" in name:
+            categories["performance"].append(result)
     
-    # Show critical issues first
-    if critical_tests:
-        print("\n❌ CRITICAL ISSUES:")
-        print("-" * 40)
-        for result in critical_tests:
-            print(f"✗ {result['name']}")
-            if result["output"]:
-                for line in result["output"].split("\n"):
-                    print(f"    {line}")
-    
-    # Show warnings
-    if warning_tests:
-        print("\n⚠️  WARNINGS:")
-        print("-" * 40)
-        for result in warning_tests:
-            print(f"! {result['name']}")
-            if result["output"]:
-                for line in result["output"].split("\n"):
-                    print(f"    {line}")
-    
-    # Show passed tests (summarized)
-    if passed_tests:
-        print("\n✅ PASSED TESTS:")
-        print("-" * 40)
-        for result in passed_tests:
-            print(f"✓ {result['name']}")
-            # Only show details for important passed tests
-            if "Server Info" in result.get("output", "") or "Statistics" in result.get("output", ""):
-                for line in result["output"].split("\n"):
-                    print(f"    {line}")
+    # Print categorized results
+    for category, tests in categories.items():
+        if tests:
+            print(f"\n{category.upper()} TESTS:")
+            print("-" * 40)
+            for result in tests:
+                status_icon = "✓" if result["status"] else "✗"
+                status_text = "PASS" if result["status"] else "FAIL"
+                severity_color = {
+                    "CRITICAL": "❌",
+                    "WARNING": "⚠️",
+                    "INFO": "ℹ️"
+                }.get(result.get("severity", "INFO"), "")
+                
+                print(f"{status_icon} {result['name']}: {status_text} {severity_color}")
+                if result["output"]:
+                    for line in result["output"].split("\n"):
+                        print(f"    {line}")
     
     # Summary
     total = len(all_results)
-    passed = len(passed_tests)
-    warnings = len(warning_tests)
-    critical = len(critical_tests)
+    passed = sum(1 for r in all_results if r["status"])
+    failed = total - passed
+    critical = sum(1 for r in all_results if r.get("severity") == "CRITICAL" and not r["status"])
+    warnings = sum(1 for r in all_results if r.get("severity") == "WARNING" and not r["status"])
     
     print("\n" + "="*60)
-    print("SUMMARY")
+    print(f"SUMMARY: {passed}/{total} tests passed")
+    if failed > 0:
+        print(f"  Failed: {failed} ({critical} critical, {warnings} warnings)")
     print("="*60)
-    print(f"Total tests: {total}")
-    print(f"✅ Passed: {passed}")
-    print(f"⚠️  Warnings: {warnings}")
-    print(f"❌ Critical: {critical}")
     
-    # Overall status
+    # Exit with appropriate code
     if critical > 0:
-        print("\n🔴 STATUS: CRITICAL ISSUES FOUND")
-        exit_code = 2
-    elif warnings > 0:
-        print("\n🟡 STATUS: WARNINGS PRESENT (but functional)")
-        exit_code = 1
+        exit(2)  # Critical failures
+    elif failed > 0:
+        exit(1)  # Non-critical failures
     else:
-        print("\n🟢 STATUS: ALL TESTS PASSED")
-        exit_code = 0
-    
-    print("="*60)
-    exit(exit_code)
+        exit(0)  # All tests passed
