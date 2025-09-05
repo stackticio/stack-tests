@@ -244,7 +244,7 @@ def test_minio_buckets() -> List[Dict]:
             })
             
             # Test bucket operations
-            results.extend(test_bucket_operations(bucket_name))
+            results.extend(check_bucket_operations(bucket_name))
         else:
             results.append({
                 "name": f"minio_bucket_{bucket_name}_exists",
