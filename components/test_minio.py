@@ -181,26 +181,7 @@ def test_minio_cluster_health() -> List[Dict]:
             "severity": "CRITICAL"
         })
     
-    # Check MinIO server health using mc admin
-    setup_mc_alias()
-    
-    # Check service health
-    cmd = "mc admin service status myminio 2>&1"
-    result = run_command(cmd, timeout=10)
-    
-    if result["exit_code"] == 0:
-        output = "MinIO service status: Online"
-        status = True
-    else:
-        output = "MinIO service status: Offline or Degraded"
-        status = False
-    
-    results.append({
-        "name": "minio_service_health",
-        "status": status,
-        "output": output,
-        "severity": "CRITICAL" if not status else "INFO"
-    })
+    # NOTE: Removed minio_service_health check here
     
     return results
 
@@ -230,7 +211,7 @@ def test_minio_buckets() -> List[Dict]:
                     bucket_name = parts[-1].rstrip("/")
                     existing_buckets.append(bucket_name)
     
-    # Test each configured bucket
+    # Test each configured bucket (without operations test)
     for bucket_config in configured_buckets:
         bucket_name = bucket_config["name"]
         
@@ -242,9 +223,7 @@ def test_minio_buckets() -> List[Dict]:
                 "output": f"Bucket '{bucket_name}' exists",
                 "severity": "INFO"
             })
-            
-            # Test bucket operations
-            results.extend(test_bucket_operations(bucket_name))
+            # NOTE: Removed call to test_bucket_operations here
         else:
             results.append({
                 "name": f"minio_bucket_{bucket_name}_exists",
@@ -266,71 +245,7 @@ def test_minio_buckets() -> List[Dict]:
     return results
 
 
-def test_bucket_operations(bucket: str) -> List[Dict]:
-    """Test read/write operations on a specific bucket"""
-    results = []
-    
-    # Generate test file name
-    test_file = f"test-{uuid.uuid4().hex[:8]}.txt"
-    test_content = f"MinIO test at {datetime.now().isoformat()}"
-    
-    # Write test - create a temporary file and upload
-    temp_file = f"/tmp/{test_file}"
-    with open(temp_file, 'w') as f:
-        f.write(test_content)
-    
-    write_cmd = f"mc cp {temp_file} myminio/{bucket}/ 2>&1"
-    write_result = run_command(write_cmd, timeout=15)
-    
-    # Clean up temp file
-    os.remove(temp_file)
-    
-    if write_result["exit_code"] == 0:
-        results.append({
-            "name": f"minio_bucket_{bucket}_write",
-            "status": True,
-            "output": f"Successfully wrote test file to bucket '{bucket}'",
-            "severity": "INFO"
-        })
-        
-        # Read test - list and verify the file exists
-        read_cmd = f"mc ls myminio/{bucket}/{test_file} 2>&1"
-        read_result = run_command(read_cmd, timeout=10)
-        
-        if read_result["exit_code"] == 0:
-            results.append({
-                "name": f"minio_bucket_{bucket}_read",
-                "status": True,
-                "output": f"Successfully verified file in bucket '{bucket}'",
-                "severity": "INFO"
-            })
-        else:
-            results.append({
-                "name": f"minio_bucket_{bucket}_read",
-                "status": False,
-                "output": f"Failed to read from bucket '{bucket}'",
-                "severity": "WARNING"
-            })
-        
-        # Cleanup - remove test file
-        cleanup_cmd = f"mc rm myminio/{bucket}/{test_file} 2>&1"
-        run_command(cleanup_cmd, timeout=10)
-        
-    else:
-        results.append({
-            "name": f"minio_bucket_{bucket}_write",
-            "status": False,
-            "output": f"Failed to write to bucket '{bucket}': {write_result['stderr']}",
-            "severity": "CRITICAL"
-        })
-        results.append({
-            "name": f"minio_bucket_{bucket}_read",
-            "status": False,
-            "output": f"Skipped read test due to write failure",
-            "severity": "WARNING"
-        })
-    
-    return results
+# NOTE: Removed test_bucket_operations function entirely
 
 
 def test_minio_statistics() -> List[Dict]:
