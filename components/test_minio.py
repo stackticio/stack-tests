@@ -244,7 +244,7 @@ def test_minio_buckets() -> List[Dict]:
             })
             
             # Test bucket operations
-            results.extend(check_bucket_operations(bucket_name))
+            results.extend(test_bucket_operations(bucket_name))
         else:
             results.append({
                 "name": f"minio_bucket_{bucket_name}_exists",
@@ -267,7 +267,7 @@ def test_minio_buckets() -> List[Dict]:
 
 
 def test_bucket_operations(bucket: str) -> List[Dict]:
-    """Test read/write operations on a specific bucket - called from test_minio_buckets"""
+    """Test read/write operations on a specific bucket"""
     results = []
     
     # Generate test file name
@@ -276,61 +276,59 @@ def test_bucket_operations(bucket: str) -> List[Dict]:
     
     # Write test - create a temporary file and upload
     temp_file = f"/tmp/{test_file}"
-    try:
-        with open(temp_file, 'w') as f:
-            f.write(test_content)
+    with open(temp_file, 'w') as f:
+        f.write(test_content)
+    
+    write_cmd = f"mc cp {temp_file} myminio/{bucket}/ 2>&1"
+    write_result = run_command(write_cmd, timeout=15)
+    
+    # Clean up temp file
+    os.remove(temp_file)
+    
+    if write_result["exit_code"] == 0:
+        results.append({
+            "name": f"minio_bucket_{bucket}_write",
+            "status": True,
+            "output": f"Successfully wrote test file to bucket '{bucket}'",
+            "severity": "INFO"
+        })
         
-        write_cmd = f"mc cp {temp_file} myminio/{bucket}/ 2>&1"
-        write_result = run_command(write_cmd, timeout=15)
+        # Read test - list and verify the file exists
+        read_cmd = f"mc ls myminio/{bucket}/{test_file} 2>&1"
+        read_result = run_command(read_cmd, timeout=10)
         
-        if write_result["exit_code"] == 0:
+        if read_result["exit_code"] == 0:
             results.append({
-                "name": f"minio_bucket_{bucket}_write",
+                "name": f"minio_bucket_{bucket}_read",
                 "status": True,
-                "output": f"Successfully wrote test file to bucket '{bucket}'",
+                "output": f"Successfully verified file in bucket '{bucket}'",
                 "severity": "INFO"
             })
-            
-            # Read test - list and verify the file exists
-            read_cmd = f"mc ls myminio/{bucket}/{test_file} 2>&1"
-            read_result = run_command(read_cmd, timeout=10)
-            
-            if read_result["exit_code"] == 0:
-                results.append({
-                    "name": f"minio_bucket_{bucket}_read",
-                    "status": True,
-                    "output": f"Successfully verified file in bucket '{bucket}'",
-                    "severity": "INFO"
-                })
-            else:
-                results.append({
-                    "name": f"minio_bucket_{bucket}_read",
-                    "status": False,
-                    "output": f"Failed to read from bucket '{bucket}'",
-                    "severity": "WARNING"
-                })
-            
-            # Cleanup - remove test file
-            cleanup_cmd = f"mc rm myminio/{bucket}/{test_file} 2>&1"
-            run_command(cleanup_cmd, timeout=10)
-            
         else:
-            results.append({
-                "name": f"minio_bucket_{bucket}_write",
-                "status": False,
-                "output": f"Failed to write to bucket '{bucket}': {write_result['stderr'][:100]}",
-                "severity": "CRITICAL"
-            })
             results.append({
                 "name": f"minio_bucket_{bucket}_read",
                 "status": False,
-                "output": f"Skipped read test due to write failure",
+                "output": f"Failed to read from bucket '{bucket}'",
                 "severity": "WARNING"
             })
-    finally:
-        # Always clean up temp file
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
+        
+        # Cleanup - remove test file
+        cleanup_cmd = f"mc rm myminio/{bucket}/{test_file} 2>&1"
+        run_command(cleanup_cmd, timeout=10)
+        
+    else:
+        results.append({
+            "name": f"minio_bucket_{bucket}_write",
+            "status": False,
+            "output": f"Failed to write to bucket '{bucket}': {write_result['stderr']}",
+            "severity": "CRITICAL"
+        })
+        results.append({
+            "name": f"minio_bucket_{bucket}_read",
+            "status": False,
+            "output": f"Skipped read test due to write failure",
+            "severity": "WARNING"
+        })
     
     return results
 
