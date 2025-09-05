@@ -107,9 +107,18 @@ def setup_mc_alias(pod: str) -> Dict:
     port = get_minio_port()
     access_key, secret_key = get_minio_credentials()
     
-    # Setup mc alias
-    cmd = f"kubectl exec -n {namespace} {pod} -- mc alias set myminio http://{host}:{port} {access_key} {secret_key} 2>&1"
+    # Use localhost if connecting from within the pod
+    # This is more reliable than using the service name
+    internal_host = "localhost"
+    
+    # Setup mc alias using localhost
+    cmd = f"kubectl exec -n {namespace} {pod} -- mc alias set myminio http://{internal_host}:{port} {access_key} {secret_key} --api S3v4 2>&1"
     result = run_command(cmd, timeout=10)
+    
+    if result["exit_code"] != 0:
+        # Fallback to service hostname
+        cmd = f"kubectl exec -n {namespace} {pod} -- mc alias set myminio http://{host}:{port} {access_key} {secret_key} --api S3v4 2>&1"
+        result = run_command(cmd, timeout=10)
     
     return {
         "name": "minio_mc_setup",
