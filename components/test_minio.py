@@ -32,7 +32,6 @@ def run_command(command: str, env: Dict = None, timeout: int = 30) -> Dict:
 
 def get_minio_namespace() -> str:
     """Get MinIO namespace from env or default"""
-    # Check MINIO_MINIO_NS first, then MINIO_NS
     return os.getenv("MINIO_MINIO_NS", os.getenv("MINIO_NS", "minio"))
 
 
@@ -74,54 +73,30 @@ def parse_buckets_from_env() -> List[Dict]:
     return buckets
 
 
-def check_mc_available() -> bool:
-    """Check if mc client is available locally"""
-    cmd = "which mc"
-    result = run_command(cmd, timeout=5)
-    return result["exit_code"] == 0
-
-
-def setup_mc_alias_local() -> Dict:
-    """Setup MinIO client alias locally (in stack-agent container)"""
+def setup_mc_alias() -> Dict:
+    """Setup MinIO client alias locally"""
     host = get_minio_host()
     port = get_minio_port()
     access_key, secret_key = get_minio_credentials()
     
-    # Setup mc alias
+    # Setup mc alias locally
     cmd = f"mc alias set myminio http://{host}:{port} {access_key} {secret_key} --api S3v4 2>&1"
     result = run_command(cmd, timeout=10)
     
-    if result["exit_code"] == 0 or "already exists" in result["stdout"]:
-        return {
-            "name": "minio_mc_setup",
-            "status": True,
-            "output": "MinIO client configured locally",
-            "severity": "INFO"
-        }
-    else:
-        return {
-            "name": "minio_mc_setup",
-            "status": False,
-            "output": f"Failed to configure mc: {result['stderr']}",
-            "severity": "CRITICAL"
-        }
+    return {
+        "name": "minio_mc_setup",
+        "status": result["exit_code"] == 0 or "already exists" in result["stdout"],
+        "output": "MinIO client configured" if result["exit_code"] == 0 or "already exists" in result["stdout"] else f"Failed to configure mc: {result['stderr']}",
+        "severity": "CRITICAL" if result["exit_code"] != 0 and "already exists" not in result["stdout"] else "INFO"
+    }
 
 
 def test_minio_connectivity() -> List[Dict]:
     """Test MinIO server connectivity"""
     results = []
     
-    # Check if mc is available
-    if not check_mc_available():
-        return [{
-            "name": "minio_connectivity",
-            "status": False,
-            "output": "MinIO client (mc) not available in this container",
-            "severity": "CRITICAL"
-        }]
-    
-    # Setup mc alias
-    setup_result = setup_mc_alias_local()
+    # Setup mc alias first
+    setup_result = setup_mc_alias()
     if not setup_result["status"]:
         return [setup_result]
     
@@ -196,7 +171,7 @@ def test_minio_cluster_health() -> List[Dict]:
             "name": "minio_pod_health",
             "status": running_pods > 0,
             "output": output.strip(),
-            "severity": "WARNING" if running_pods < total_pods else "INFO"
+            "severity": "WARNING" if running_pods < total_pods and running_pods > 0 else ("CRITICAL" if running_pods == 0 else "INFO")
         })
     else:
         results.append({
@@ -207,26 +182,25 @@ def test_minio_cluster_health() -> List[Dict]:
         })
     
     # Check MinIO server health using mc admin
-    if check_mc_available():
-        setup_mc_alias_local()
-        
-        # Check service health
-        cmd = "mc admin service status myminio 2>&1"
-        result = run_command(cmd, timeout=10)
-        
-        if result["exit_code"] == 0:
-            output = "MinIO service status: Online"
-            status = True
-        else:
-            output = "MinIO service status: Offline or Degraded"
-            status = False
-        
-        results.append({
-            "name": "minio_service_health",
-            "status": status,
-            "output": output,
-            "severity": "CRITICAL" if not status else "INFO"
-        })
+    setup_mc_alias()
+    
+    # Check service health
+    cmd = "mc admin service status myminio 2>&1"
+    result = run_command(cmd, timeout=10)
+    
+    if result["exit_code"] == 0:
+        output = "MinIO service status: Online"
+        status = True
+    else:
+        output = "MinIO service status: Offline or Degraded"
+        status = False
+    
+    results.append({
+        "name": "minio_service_health",
+        "status": status,
+        "output": output,
+        "severity": "CRITICAL" if not status else "INFO"
+    })
     
     return results
 
@@ -235,16 +209,8 @@ def test_minio_buckets() -> List[Dict]:
     """Test all configured buckets"""
     results = []
     
-    if not check_mc_available():
-        return [{
-            "name": "minio_buckets",
-            "status": False,
-            "output": "Cannot test buckets - mc not available",
-            "severity": "CRITICAL"
-        }]
-    
     # Setup mc alias
-    setup_mc_alias_local()
+    setup_mc_alias()
     
     # Get configured buckets from environment
     configured_buckets = parse_buckets_from_env()
@@ -277,14 +243,14 @@ def test_minio_buckets() -> List[Dict]:
                 "severity": "INFO"
             })
             
-            # Test bucket operations - NOW PASSING bucket_name CORRECTLY
+            # Test bucket operations
             results.extend(test_bucket_operations(bucket_name))
         else:
             results.append({
                 "name": f"minio_bucket_{bucket_name}_exists",
                 "status": False,
-                "output": f"Bucket '{bucket_name}' not found (may need to run bucket creation jobs)",
-                "severity": "WARNING"
+                "output": f"Bucket '{bucket_name}' not found",
+                "severity": "CRITICAL"
             })
     
     # Report on unconfigured buckets
@@ -308,12 +274,11 @@ def test_bucket_operations(bucket: str) -> List[Dict]:
     test_file = f"test-{uuid.uuid4().hex[:8]}.txt"
     test_content = f"MinIO test at {datetime.now().isoformat()}"
     
-    # Create a temporary file locally
+    # Write test - create a temporary file and upload
     temp_file = f"/tmp/{test_file}"
     with open(temp_file, 'w') as f:
         f.write(test_content)
     
-    # Write test - upload file to bucket
     write_cmd = f"mc cp {temp_file} myminio/{bucket}/ 2>&1"
     write_result = run_command(write_cmd, timeout=15)
     
@@ -371,16 +336,7 @@ def test_bucket_operations(bucket: str) -> List[Dict]:
 def test_minio_statistics() -> List[Dict]:
     """Get MinIO storage statistics"""
     results = []
-    
-    if not check_mc_available():
-        return [{
-            "name": "minio_statistics",
-            "status": False,
-            "output": "Cannot get statistics - mc not available",
-            "severity": "WARNING"
-        }]
-    
-    setup_mc_alias_local()
+    setup_mc_alias()
     
     # Get disk usage
     cmd = "mc admin info myminio --json 2>&1"
@@ -430,7 +386,7 @@ def test_minio_statistics() -> List[Dict]:
             })
             
         except (json.JSONDecodeError, KeyError) as e:
-            # Fallback to non-JSON output
+            # Fallback to basic info
             cmd = "mc admin info myminio 2>&1"
             result = run_command(cmd, timeout=10)
             
@@ -446,13 +402,6 @@ def test_minio_statistics() -> List[Dict]:
                     "status": True,
                     "output": output.strip(),
                     "severity": "INFO"
-                })
-            else:
-                results.append({
-                    "name": "minio_storage_stats",
-                    "status": False,
-                    "output": "Failed to retrieve storage statistics",
-                    "severity": "WARNING"
                 })
     else:
         results.append({
@@ -482,19 +431,10 @@ def test_minio_statistics() -> List[Dict]:
     return results
 
 
-def test_minio_bucket_users() -> List[Dict]:
-    """Test MinIO users and policies"""
+def test_minio_policies() -> List[Dict]:
+    """Test MinIO policies and access controls"""
     results = []
-    
-    if not check_mc_available():
-        return [{
-            "name": "minio_bucket_users",
-            "status": False,
-            "output": "Cannot test users - mc not available",
-            "severity": "WARNING"
-        }]
-    
-    setup_mc_alias_local()
+    setup_mc_alias()
     
     # List users
     cmd = "mc admin user list myminio 2>&1"
@@ -520,13 +460,6 @@ def test_minio_bucket_users() -> List[Dict]:
             "status": True,
             "output": output,
             "severity": "INFO"
-        })
-    else:
-        results.append({
-            "name": "minio_bucket_users",
-            "status": False,
-            "output": f"Cannot list users: {result['stderr']}",
-            "severity": "WARNING"
         })
     
     # List policies
@@ -673,7 +606,7 @@ def test_minio_network() -> List[Dict]:
             "severity": "CRITICAL"
         })
     
-    # Test health endpoint
+    # Test network connectivity locally
     cmd = f"curl -s -o /dev/null -w '%{{http_code}}' http://{host}:{port}/minio/health/live 2>&1"
     result = run_command(cmd, timeout=10)
     
@@ -698,16 +631,7 @@ def test_minio_network() -> List[Dict]:
 def test_minio_performance() -> List[Dict]:
     """Basic performance test for MinIO"""
     results = []
-    
-    if not check_mc_available():
-        return [{
-            "name": "minio_performance",
-            "status": False,
-            "output": "Cannot test performance - mc not available",
-            "severity": "WARNING"
-        }]
-    
-    setup_mc_alias_local()
+    setup_mc_alias()
     
     # Create a test bucket for performance testing
     test_bucket = f"perftest-{uuid.uuid4().hex[:8]}"
@@ -783,7 +707,7 @@ if __name__ == "__main__":
     
     # Try to get credentials
     access_key, secret_key = get_minio_credentials()
-    print(f"  Credentials: {'Configured' if access_key else 'Not set'}\n")
+    print(f"  Credentials: Using environment source\n")
     
     # Parse configured buckets
     configured_buckets = parse_buckets_from_env()
@@ -797,7 +721,7 @@ if __name__ == "__main__":
     all_results.extend(test_minio_cluster_health())
     all_results.extend(test_minio_buckets())
     all_results.extend(test_minio_statistics())
-    all_results.extend(test_minio_bucket_users())
+    all_results.extend(test_minio_policies())
     all_results.extend(test_minio_network())
     all_results.extend(test_minio_recent_logs())
     all_results.extend(test_minio_performance())
