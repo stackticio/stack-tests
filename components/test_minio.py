@@ -812,12 +812,16 @@ if __name__ == "__main__":
     print(f"Using MinIO configuration:")
     print(f"  Namespace: {namespace}")
     print(f"  Host: {host}")
-    print(f"  Port: {port}\n")
+    print(f"  Port: {port}")
+    
+    # Try to get credentials from secret first
+    access_key, secret_key = get_minio_credentials()
+    print(f"  Credentials: Using {'secret' if 'kubectl' in str(access_key) else 'environment'} source\n")
     
     # Parse configured buckets
     configured_buckets = parse_buckets_from_env()
     if configured_buckets:
-        print(f"Configured buckets: {', '.join([b['name'] for b in configured_buckets])}\n")
+        print(f"Configured/Detected buckets: {', '.join([b['name'] for b in configured_buckets])}\n")
     
     # Run all tests
     print("Running MinIO validation tests...\n")
@@ -826,7 +830,7 @@ if __name__ == "__main__":
     all_results.extend(test_minio_cluster_health())
     all_results.extend(test_minio_buckets())
     all_results.extend(test_minio_statistics())
-    all_results.extend(test_minio_policies())
+    all_results.extend(test_minio_bucket_users())  # New test for bucket users
     all_results.extend(test_minio_network())
     all_results.extend(test_minio_recent_logs())
     all_results.extend(test_minio_performance())
@@ -842,7 +846,7 @@ if __name__ == "__main__":
         "health": [],
         "bucket": [],
         "stats": [],
-        "policy": [],
+        "users": [],
         "network": [],
         "logs": [],
         "performance": []
@@ -858,8 +862,8 @@ if __name__ == "__main__":
             categories["bucket"].append(result)
         elif "stats" in name or "statistics" in name:
             categories["stats"].append(result)
-        elif "policy" in name or "users" in name or "policies" in name:
-            categories["policy"].append(result)
+        elif "user" in name or "policy" in name or "policies" in name:
+            categories["users"].append(result)
         elif "network" in name or "endpoint" in name:
             categories["network"].append(result)
         elif "log" in name:
