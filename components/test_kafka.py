@@ -295,22 +295,29 @@ def kafka_topic_offsets(topic: str) -> Dict:
             "severity": "WARNING"
         }
     
-    cmd = f"kubectl exec -n {namespace} {broker_pod} -- /opt/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell --broker-list localhost:9092 --topic {topic} 2>&1"
+    # Use kafka-get-offsets.sh instead of GetOffsetShell
+    cmd = f"kubectl exec -n {namespace} {broker_pod} -- /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic {topic} 2>&1"
     result = run_command(cmd, timeout=10)
     
-    if result["exit_code"] == 0 and ":" in result.get("stdout", ""):
-        # Parse offsets
+    if result["exit_code"] == 0 and result.get("stdout"):
+        # Parse offsets - format is topic:partition:offset
         lines = result["stdout"].split("\n")
         offset_info = []
         for line in lines[:3]:
-            if ":" in line:
+            if ":" in line and topic in line:
                 parts = line.split(":")
                 if len(parts) >= 3:
                     partition = parts[1]
                     offset = parts[2]
                     offset_info.append(f"P{partition}:{offset}")
-        output = "Offsets: " + " ".join(offset_info) if offset_info else "No offset data"
-        status = True
+        
+        if offset_info:
+            output = "Offsets: " + " ".join(offset_info)
+            status = True
+        else:
+            # Topic exists but no offsets (empty topic)
+            output = "Topic exists but has no messages (offset: 0)"
+            status = True
     else:
         output = "Failed to get offsets"
         status = False
@@ -417,6 +424,86 @@ def test_kafka_statistics() -> List[Dict]:
     }]
 
 
+def test_kafka_connect() -> List[Dict]:
+    """Test Kafka Connect cluster health"""
+    namespace = get_kafka_namespace()
+    results = []
+    
+    # Check Connect pods
+    cmd = f"kubectl get pods -n {namespace} -l strimzi.io/kind=KafkaConnect --no-headers 2>&1"
+    result = run_command(cmd)
+    
+    if result["exit_code"] == 0 and result["stdout"]:
+        lines = [l for l in result["stdout"].split("\n") if l.strip()]
+        running = [l for l in lines if "Running" in l and "1/1" in l]
+        
+        results.append({
+            "name": "kafka_connect_pods",
+            "status": len(running) == len(lines),
+            "output": f"Connect pods: {len(running)}/{len(lines)} running",
+            "severity": "CRITICAL" if len(running) != len(lines) else "INFO"
+        })
+    else:
+        results.append({
+            "name": "kafka_connect",
+            "status": True,
+            "output": "No KafkaConnect resources deployed",
+            "severity": "INFO"
+        })
+    
+    return results
+
+
+def test_kafka_connectors() -> List[Dict]:
+    """Test all KafkaConnector resources"""
+    namespace = get_kafka_namespace()
+    results = []
+    
+    # Get all KafkaConnector CRs
+    cmd = f"kubectl get kafkaconnector -n {namespace} -o json 2>&1"
+    result = run_command(cmd)
+    
+    if result["exit_code"] == 0:
+        try:
+            data = json.loads(result["stdout"])
+            items = data.get("items", [])
+            
+            if not items:
+                results.append({
+                    "name": "kafka_connectors",
+                    "status": True,
+                    "output": "No connectors deployed",
+                    "severity": "INFO"
+                })
+            else:
+                for item in items:
+                    name = item.get("metadata", {}).get("name", "unknown")
+                    status = item.get("status", {})
+                    conditions = status.get("conditions", [])
+                    ready_condition = next((c for c in conditions if c.get("type") == "Ready"), {})
+                    is_ready = ready_condition.get("status") == "True"
+                    
+                    output = f"Connector '{name}': {'Ready' if is_ready else 'Not Ready'}"
+                    
+                    results.append({
+                        "name": f"kafka_connector_{name}",
+                        "status": is_ready,
+                        "output": output,
+                        "severity": "CRITICAL" if not is_ready else "INFO"
+                    })
+        except:
+            pass
+    else:
+        results.append({
+            "name": "kafka_connectors",
+            "status": True,
+            "output": "No KafkaConnector CRs found",
+            "severity": "INFO"
+        })
+    
+    return results
+
+
 # Main execution
 if __name__ == "__main__":
     all_results = []
@@ -430,6 +517,8 @@ if __name__ == "__main__":
     all_results.extend(test_kafka_consumer_groups())
     all_results.extend(test_kafka_statistics())
     all_results.extend(test_topics())
+    all_results.extend(test_kafka_connect())
+    all_results.extend(test_kafka_connectors())
     all_results.extend(test_kafka_cluster_health())
     
     # Print clean results
