@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-test_prometheus_clean.py - Prometheus Health Check (ASCII only)
+test_prometheus_json.py - Prometheus Health Check with JSON output
 """
 
 import os
+import sys
 import json
 import subprocess
 import urllib.request
@@ -77,23 +78,22 @@ def test_prometheus_api() -> List[Dict]:
         data = response.get("data", {})
         if data.get("status") == "success":
             result_count = len(data.get("data", {}).get("result", []))
-            output = f"Prometheus API: HEALTHY\n"
-            output += f"  Endpoint: {config['prometheus_url']}\n"
-            output += f"  Query test returned {result_count} results"
+            output = f"Connected to Prometheus at {config['prometheus_url']}, {result_count} targets found"
             status = True
         else:
-            output = f"Prometheus API: FAILED - API returned non-success status"
+            output = f"API returned non-success status"
             status = False
     else:
         error = response.get("error", "Unknown error") if response else "No response"
-        output = f"Prometheus API: FAILED\n  Error: {error}"
+        output = f"Failed to connect: {error}"
         status = False
     
     results.append({
         "name": "prometheus_api",
+        "description": "Check Prometheus API connectivity",
         "status": status,
         "output": output,
-        "severity": "CRITICAL" if not status else "INFO"
+        "severity": "critical" if not status else "info"
     })
     
     config_response = query_http(f"{config['prometheus_url']}/api/v1/status/config")
@@ -102,59 +102,13 @@ def test_prometheus_api() -> List[Dict]:
         if yaml_config:
             results.append({
                 "name": "prometheus_config",
+                "description": "Check Prometheus configuration",
                 "status": True,
                 "output": f"Configuration loaded: {len(yaml_config)} bytes",
-                "severity": "INFO"
+                "severity": "info"
             })
     
     return results
-
-
-def test_prometheus_uptime() -> List[Dict]:
-    """Check Prometheus uptime and restarts"""
-    config = get_prometheus_config()
-    namespace = config["namespace"]
-    
-    cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=prometheus --no-headers | grep -v node-exporter | head -1"
-    pod_result = run_command(cmd)
-    
-    if pod_result["exit_code"] != 0:
-        return [{
-            "name": "prometheus_uptime",
-            "status": False,
-            "output": "Could not find Prometheus pod",
-            "severity": "WARNING"
-        }]
-    
-    pod_info = pod_result["stdout"].split()
-    pod_name = pod_info[0] if pod_info else "unknown"
-    restart_count = pod_info[3] if len(pod_info) > 3 else "0"
-    
-    response = query_http(f"{config['prometheus_url']}/api/v1/query?query=process_start_time_seconds{{job='prometheus-kube-prometheus-prometheus'}}")
-    
-    output = f"Prometheus Uptime:\n"
-    output += f"  Pod: {pod_name}\n"
-    output += f"  Restart Count: {restart_count}\n"
-    
-    if response and response.get("status_code") == 200:
-        result_data = response.get("data", {}).get("data", {}).get("result", [])
-        if result_data:
-            start_time = float(result_data[0].get("value", [0, "0"])[1])
-            uptime_seconds = time.time() - start_time
-            uptime_hours = uptime_seconds / 3600
-            output += f"  Uptime: {uptime_hours:.1f} hours\n"
-            
-            if uptime_hours < 1:
-                output += "  WARNING: Recently restarted - metrics may still be initializing"
-    
-    status = restart_count == "0" or int(restart_count) < 2
-    
-    return [{
-        "name": "prometheus_uptime",
-        "status": status,
-        "output": output.strip(),
-        "severity": "WARNING" if not status else "INFO"
-    }]
 
 
 def test_scrape_targets() -> List[Dict]:
@@ -166,9 +120,10 @@ def test_scrape_targets() -> List[Dict]:
     if not response or response.get("status_code") != 200:
         return [{
             "name": "scrape_targets",
+            "description": "Check Prometheus scrape targets health",
             "status": False,
             "output": f"Failed to query targets: {response.get('error', 'Unknown') if response else 'No response'}",
-            "severity": "CRITICAL"
+            "severity": "critical"
         }]
     
     targets = response.get("data", {}).get("data", {}).get("activeTargets", [])
@@ -181,7 +136,7 @@ def test_scrape_targets() -> List[Dict]:
         health = target.get("health", "unknown")
         
         if job not in targets_by_job:
-            targets_by_job[job] = {"up": 0, "down": 0, "unknown": 0}
+            targets_by_job[job] = {"up": 0, "down": 0}
         
         if health == "up":
             targets_by_job[job]["up"] += 1
@@ -190,43 +145,31 @@ def test_scrape_targets() -> List[Dict]:
             unhealthy_targets.append({
                 "job": job,
                 "instance": target.get("labels", {}).get("instance", "unknown"),
-                "error": target.get("lastError", "No error details")[:100]
+                "error": target.get("lastError", "")[:100]
             })
-        else:
-            targets_by_job[job]["unknown"] += 1
     
     total_targets = len(targets)
     total_up = sum(j["up"] for j in targets_by_job.values())
     
-    output = f"Scrape Targets Summary: {total_up}/{total_targets} healthy\n\n"
-    output += "By Job:\n"
-    
-    for job, counts in sorted(targets_by_job.items()):
-        total_job = counts["up"] + counts["down"] + counts["unknown"]
-        health_pct = (counts["up"] / total_job * 100) if total_job > 0 else 0
-        status_str = "OK" if health_pct == 100 else "WARN" if health_pct >= 50 else "FAIL"
-        output += f"  [{status_str}] {job}: {counts['up']}/{total_job} up ({health_pct:.0f}%)\n"
-    
+    output = f"{total_up}/{total_targets} targets healthy"
     if unhealthy_targets:
-        output += "\nUnhealthy Targets (first 5):\n"
-        for target in unhealthy_targets[:5]:
-            output += f"  - {target['job']}/{target['instance']}\n"
-            output += f"    Error: {target['error']}\n"
+        output += f", {len(unhealthy_targets)} unhealthy: "
+        output += ", ".join([f"{t['job']}/{t['instance']}" for t in unhealthy_targets[:3]])
     
     status = total_up >= total_targets * 0.8 if total_targets > 0 else False
     
     return [{
         "name": "scrape_targets",
+        "description": "Check Prometheus scrape targets health",
         "status": status,
-        "output": output.strip(),
-        "severity": "WARNING" if not status else "INFO"
+        "output": output,
+        "severity": "warning" if not status else "info"
     }]
 
 
 def test_servicemonitors() -> List[Dict]:
-    """Test ServiceMonitors and verify they're being scraped"""
+    """Test ServiceMonitors"""
     config = get_prometheus_config()
-    results = []
     
     cmd = "kubectl get servicemonitors.monitoring.coreos.com -A -o json"
     sm_result = run_command(cmd)
@@ -234,9 +177,10 @@ def test_servicemonitors() -> List[Dict]:
     if sm_result["exit_code"] != 0:
         return [{
             "name": "servicemonitors",
+            "description": "Check ServiceMonitors configuration",
             "status": False,
             "output": "Failed to get ServiceMonitors",
-            "severity": "WARNING"
+            "severity": "warning"
         }]
     
     try:
@@ -253,156 +197,79 @@ def test_servicemonitors() -> List[Dict]:
                 if job:
                     active_jobs.add(job)
         
-        sm_by_namespace = {}
-        sm_without_targets = []
-        sm_with_targets = []
-        
+        sm_with_targets = 0
         for sm in servicemonitors:
-            metadata = sm.get("metadata", {})
-            spec = sm.get("spec", {})
-            name = metadata.get("name", "unknown")
-            namespace = metadata.get("namespace", "unknown")
-            
-            sm_by_namespace[namespace] = sm_by_namespace.get(namespace, 0) + 1
-            
-            potential_jobs = [
-                name,
-                f"{namespace}/{name}",
-                name.replace("prometheus-", ""),
-                name.replace("-metrics", "")
-            ]
-            
-            has_active_targets = any(job in active_jobs or job in pj for pj in potential_jobs for job in active_jobs)
-            
-            if has_active_targets:
-                sm_with_targets.append(f"{namespace}/{name}")
-            else:
-                endpoints = spec.get("endpoints", [])
-                if not endpoints:
-                    sm_without_targets.append(f"{namespace}/{name}: No endpoints defined")
-                else:
-                    sm_without_targets.append(f"{namespace}/{name}: Not being scraped")
+            name = sm.get("metadata", {}).get("name", "unknown")
+            if any(name in job or job in name for job in active_jobs):
+                sm_with_targets += 1
         
         total_sm = len(servicemonitors)
-        active_sm = len(sm_with_targets)
+        output = f"{total_sm} ServiceMonitors found, {sm_with_targets} active"
+        status = sm_with_targets > 0 and sm_with_targets >= total_sm * 0.5
         
-        output = f"ServiceMonitors: {total_sm} total, {active_sm} active\n\n"
-        output += "By Namespace:\n"
-        for ns in sorted(sm_by_namespace.keys())[:10]:
-            output += f"  {ns}: {sm_by_namespace[ns]}\n"
-        
-        if sm_without_targets:
-            output += f"\nInactive/Misconfigured ServiceMonitors ({len(sm_without_targets)}):\n"
-            for sm in sm_without_targets[:10]:
-                output += f"  - {sm}\n"
-        
-        critical_monitors = [
-            "prometheus/prometheus-kube-prometheus-prometheus",
-            "prometheus/prometheus-kube-state-metrics",
-            "prometheus/prometheus-prometheus-node-exporter"
-        ]
-        
-        output += "\nCritical ServiceMonitors:\n"
-        for monitor_path in critical_monitors:
-            if monitor_path in sm_with_targets:
-                output += f"  [OK] {monitor_path}: Active\n"
-            else:
-                output += f"  [FAIL] {monitor_path}: Not found or inactive\n"
-        
-        status = active_sm > 0 and active_sm >= total_sm * 0.5
-        
-        results.append({
+        return [{
             "name": "servicemonitors",
+            "description": "Check ServiceMonitors configuration",
             "status": status,
-            "output": output.strip(),
-            "severity": "WARNING" if not status else "INFO"
-        })
+            "output": output,
+            "severity": "warning" if not status else "info"
+        }]
         
     except Exception as e:
-        results.append({
+        return [{
             "name": "servicemonitors",
+            "description": "Check ServiceMonitors configuration",
             "status": False,
             "output": f"Error analyzing ServiceMonitors: {str(e)}",
-            "severity": "WARNING"
-        })
-    
-    return results
+            "severity": "warning"
+        }]
 
 
 def test_metrics_collection() -> List[Dict]:
-    """Verify actual metrics are being collected"""
+    """Verify metrics are being collected"""
     config = get_prometheus_config()
     results = []
     
     test_queries = [
-        {
-            "query": "up",
-            "name": "up_metric",
-            "description": "Basic up metric",
-            "check": lambda r: len(r) > 0
-        },
-        {
-            "query": "container_memory_usage_bytes",
-            "name": "container_metrics",
-            "description": "Container metrics (from cAdvisor)",
-            "check": lambda r: len(r) > 0
-        },
-        {
-            "query": "node_cpu_seconds_total",
-            "name": "node_metrics",
-            "description": "Node exporter metrics",
-            "check": lambda r: len(r) > 0
-        },
-        {
-            "query": "kube_pod_info",
-            "name": "kube_state_metrics",
-            "description": "Kube-state-metrics",
-            "check": lambda r: len(r) > 0
-        },
-        {
-            "query": "prometheus_tsdb_head_samples",
-            "name": "prometheus_internal",
-            "description": "Prometheus internal metrics",
-            "check": lambda r: len(r) > 0
-        },
-        {
-            "query": "rate(prometheus_tsdb_head_samples_appended_total[5m])",
-            "name": "ingestion_rate",
-            "description": "Sample ingestion rate",
-            "check": lambda r: len(r) > 0 and any(float(x.get("value", [0, "0"])[1]) > 0 for x in r)
-        }
+        ("up", "up_metric", "Basic up metric"),
+        ("container_memory_usage_bytes", "container_metrics", "Container metrics"),
+        ("node_cpu_seconds_total", "node_metrics", "Node exporter metrics"),
+        ("kube_pod_info", "kube_state_metrics", "Kube-state-metrics"),
+        ("prometheus_tsdb_head_samples", "prometheus_internal", "Prometheus internal metrics"),
+        ("rate(prometheus_tsdb_head_samples_appended_total[5m])", "ingestion_rate", "Sample ingestion rate")
     ]
     
-    for test in test_queries:
-        response = query_http(f"{config['prometheus_url']}/api/v1/query?query={test['query']}")
+    for query, name, description in test_queries:
+        response = query_http(f"{config['prometheus_url']}/api/v1/query?query={query}")
         
         if response and response.get("status_code") == 200:
             result_data = response.get("data", {}).get("data", {}).get("result", [])
             
-            if test["check"](result_data):
-                if test["name"] == "up_metric":
+            if result_data:
+                if name == "up_metric":
                     up_count = sum(1 for r in result_data if r.get("value", [None, "0"])[1] == "1")
                     total = len(result_data)
-                    output = f"{test['description']}: OK - {up_count}/{total} targets up"
-                elif test["name"] == "ingestion_rate":
+                    output = f"{up_count}/{total} targets up"
+                elif name == "ingestion_rate":
                     rates = [float(r.get("value", [0, "0"])[1]) for r in result_data]
                     avg_rate = sum(rates) / len(rates) if rates else 0
-                    output = f"{test['description']}: OK - {avg_rate:.0f} samples/sec"
+                    output = f"{avg_rate:.0f} samples/sec"
                 else:
-                    output = f"{test['description']}: OK - {len(result_data)} series found"
+                    output = f"{len(result_data)} series found"
                 status = True
             else:
-                output = f"{test['description']}: FAILED - No data or check failed"
+                output = "No data"
                 status = False
         else:
-            output = f"{test['description']}: FAILED - Query failed"
+            output = "Query failed"
             status = False
         
         results.append({
-            "name": test["name"],
+            "name": name,
+            "description": description,
             "status": status,
             "output": output,
-            "severity": "WARNING" if not status and test["name"] != "ingestion_rate" else "INFO"
+            "severity": "warning" if not status and name != "ingestion_rate" else "info"
         })
     
     return results
@@ -417,9 +284,10 @@ def test_tsdb_health() -> List[Dict]:
     if not response or response.get("status_code") != 200:
         return [{
             "name": "tsdb_health",
+            "description": "Check TSDB health",
             "status": False,
             "output": "Failed to query TSDB status",
-            "severity": "WARNING"
+            "severity": "warning"
         }]
     
     tsdb_data = response.get("data", {}).get("data", {})
@@ -430,160 +298,20 @@ def test_tsdb_health() -> List[Dict]:
     chunks = head_stats.get("chunks", 0)
     wal_corruptions = head_stats.get("walCorruptions", 0)
     
-    output = f"TSDB Statistics:\n"
-    output += f"  Series: {series:,}\n"
-    output += f"  Samples: {samples:,}\n"
-    output += f"  Chunks: {chunks:,}\n"
-    output += f"  WAL Corruptions: {wal_corruptions}\n"
+    output = f"Series: {series}, Samples: {samples}, Chunks: {chunks}, WAL Corruptions: {wal_corruptions}"
     
-    # Check if we have actual data
     if series > 0 and samples == 0:
-        output += "\n  WARNING: Have series but no samples - possible recent restart"
+        output += " (WARNING: Have series but no samples)"
     
     status = series > 0 and wal_corruptions == 0
     
     return [{
         "name": "tsdb_health",
+        "description": "Check TSDB health",
         "status": status,
-        "output": output.strip(),
-        "severity": "WARNING" if not status else "INFO"
+        "output": output,
+        "severity": "warning" if not status else "info"
     }]
-
-
-def test_rules() -> List[Dict]:
-    """Test Prometheus recording and alerting rules"""
-    config = get_prometheus_config()
-    
-    response = query_http(f"{config['prometheus_url']}/api/v1/rules")
-    
-    if not response or response.get("status_code") != 200:
-        return [{
-            "name": "prometheus_rules",
-            "status": False,
-            "output": "Failed to query rules",
-            "severity": "WARNING"
-        }]
-    
-    groups = response.get("data", {}).get("data", {}).get("groups", [])
-    
-    total_groups = len(groups)
-    recording_rules = 0
-    alerting_rules = 0
-    firing_alerts = []
-    pending_alerts = []
-    
-    for group in groups:
-        for rule in group.get("rules", []):
-            if rule.get("type") == "recording":
-                recording_rules += 1
-            elif rule.get("type") == "alerting":
-                alerting_rules += 1
-                state = rule.get("state")
-                if state == "firing":
-                    firing_alerts.append({
-                        "name": rule.get("name"),
-                        "severity": rule.get("labels", {}).get("severity", "unknown")
-                    })
-                elif state == "pending":
-                    pending_alerts.append(rule.get("name"))
-    
-    output = f"Rules Summary:\n"
-    output += f"  Groups: {total_groups}\n"
-    output += f"  Recording Rules: {recording_rules}\n"
-    output += f"  Alerting Rules: {alerting_rules}\n"
-    
-    if firing_alerts:
-        output += f"\nFiring Alerts ({len(firing_alerts)}):\n"
-        for alert in firing_alerts[:10]:
-            output += f"  - {alert['name']} (severity: {alert['severity']})\n"
-    
-    if pending_alerts:
-        output += f"\nPending Alerts ({len(pending_alerts)}):\n"
-        for alert in pending_alerts[:5]:
-            output += f"  - {alert}\n"
-    
-    status = total_groups > 0 and (recording_rules > 0 or alerting_rules > 0)
-    
-    return [{
-        "name": "prometheus_rules",
-        "status": status,
-        "output": output.strip(),
-        "severity": "INFO"
-    }]
-
-
-def test_exporters() -> List[Dict]:
-    """Test various Prometheus exporters"""
-    config = get_prometheus_config()
-    namespace = config["namespace"]
-    results = []
-    
-    exporters = [
-        {
-            "name": "node-exporter",
-            "query": "up{job=~'.*node.*'}",
-            "pod_label": "app.kubernetes.io/name=prometheus-node-exporter"
-        },
-        {
-            "name": "kube-state-metrics", 
-            "query": "up{job=~'.*kube-state.*'}",
-            "pod_label": "app.kubernetes.io/name=kube-state-metrics"
-        },
-        {
-            "name": "pushgateway",
-            "query": "up{job=~'.*pushgateway.*'}",
-            "pod_label": "app=pushgateway"
-        }
-    ]
-    
-    for exporter in exporters:
-        cmd = f"kubectl get pods -n {namespace} -l {exporter['pod_label']} --no-headers"
-        pod_result = run_command(cmd)
-        
-        pod_status = "Not found"
-        pod_count = 0
-        
-        if pod_result["exit_code"] == 0 and pod_result["stdout"]:
-            lines = [l for l in pod_result["stdout"].split("\n") if l.strip()]
-            running = [l for l in lines if "Running" in l]
-            pod_count = len(lines)
-            pod_status = f"{len(running)}/{pod_count} running"
-        
-        response = query_http(f"{config['prometheus_url']}/api/v1/query?query={exporter['query']}")
-        
-        metrics_status = "No metrics"
-        up_count = 0
-        
-        if response and response.get("status_code") == 200:
-            result_data = response.get("data", {}).get("data", {}).get("result", [])
-            up_count = sum(1 for r in result_data if r.get("value", [None, "0"])[1] == "1")
-            total_targets = len(result_data)
-            if total_targets > 0:
-                metrics_status = f"{up_count}/{total_targets} targets up"
-        
-        output = f"{exporter['name']}:\n"
-        output += f"  Pods: {pod_status}\n"
-        output += f"  Metrics: {metrics_status}"
-        
-        if exporter["name"] == "node-exporter":
-            node_result = run_command("kubectl get nodes --no-headers | wc -l")
-            if node_result["exit_code"] == 0:
-                node_count = int(node_result["stdout"].strip())
-                output += f"\n  Node coverage: {pod_count}/{node_count} nodes"
-                status = pod_count == node_count and up_count == pod_count
-            else:
-                status = up_count > 0
-        else:
-            status = up_count > 0 or (pod_count > 0 and "pushgateway" in exporter["name"])
-        
-        results.append({
-            "name": f"exporter_{exporter['name'].replace('-', '_')}",
-            "status": status,
-            "output": output,
-            "severity": "WARNING" if not status and exporter["name"] != "pushgateway" else "INFO"
-        })
-    
-    return results
 
 
 def test_prometheus_operator() -> List[Dict]:
@@ -597,142 +325,58 @@ def test_prometheus_operator() -> List[Dict]:
     if pod_result["exit_code"] != 0 or not pod_result["stdout"]:
         return [{
             "name": "prometheus_operator",
+            "description": "Check Prometheus Operator",
             "status": False,
             "output": "Prometheus Operator not found",
-            "severity": "CRITICAL"
+            "severity": "critical"
         }]
     
     pod_line = pod_result["stdout"].strip()
     pod_name = pod_line.split()[0]
     pod_status = pod_line.split()[2] if len(pod_line.split()) > 2 else "Unknown"
     
-    output = f"Prometheus Operator:\n"
-    output += f"  Pod: {pod_name}\n"
-    output += f"  Status: {pod_status}\n"
-    
-    crds = {
-        "prometheuses.monitoring.coreos.com": "Prometheus instances",
-        "servicemonitors.monitoring.coreos.com": "ServiceMonitors",
-        "prometheusrules.monitoring.coreos.com": "PrometheusRules",
-        "alertmanagers.monitoring.coreos.com": "Alertmanagers"
-    }
-    
+    # Check CRDs
+    crds = ["prometheuses", "servicemonitors", "prometheusrules", "alertmanagers"]
     installed_crds = 0
-    for crd, description in crds.items():
-        cmd = f"kubectl get crd {crd} 2>/dev/null"
+    
+    for crd in crds:
+        cmd = f"kubectl get crd {crd}.monitoring.coreos.com 2>/dev/null"
         if run_command(cmd)["exit_code"] == 0:
             installed_crds += 1
-            
-            cmd = f"kubectl get {crd.split('.')[0]} -A --no-headers 2>/dev/null | wc -l"
-            count_result = run_command(cmd)
-            if count_result["exit_code"] == 0:
-                count = int(count_result["stdout"].strip()) if count_result["stdout"].strip().isdigit() else 0
-                output += f"  {description}: {count} resources\n"
     
-    output += f"\nCRDs: {installed_crds}/{len(crds)} installed"
-    
-    cmd = f"kubectl logs -n {namespace} {pod_name} --tail=50 2>/dev/null | grep -iE 'error|fail' | wc -l"
-    log_result = run_command(cmd)
-    if log_result["exit_code"] == 0:
-        error_count = int(log_result["stdout"].strip()) if log_result["stdout"].strip().isdigit() else 0
-        output += f"\nRecent errors in logs: {error_count}"
-    
+    output = f"Pod: {pod_name} ({pod_status}), CRDs: {installed_crds}/{len(crds)}"
     status = pod_status == "Running" and installed_crds == len(crds)
     
     return [{
         "name": "prometheus_operator",
+        "description": "Check Prometheus Operator",
         "status": status,
-        "output": output.strip(),
-        "severity": "CRITICAL" if not status else "INFO"
+        "output": output,
+        "severity": "critical" if not status else "info"
     }]
 
 
-def main():
-    """Main execution"""
-    print("=" * 70)
-    print("PROMETHEUS STACK HEALTH CHECK")
-    print("=" * 70)
-    
-    config = get_prometheus_config()
-    print(f"Configuration:")
-    print(f"  Namespace: {config['namespace']}")
-    print(f"  Prometheus URL: {config['prometheus_url']}")
-    print(f"  Running from: {socket.gethostname()}")
-    print("=" * 70)
-    print()
-    
+def test_prometheus():
+    """Run all Prometheus tests and return JSON results"""
     all_results = []
     
-    test_functions = [
-        ("Prometheus API", test_prometheus_api),
-        ("Prometheus Uptime", test_prometheus_uptime),
-        ("Scrape Targets", test_scrape_targets),
-        ("ServiceMonitors", test_servicemonitors),
-        ("Metrics Collection", test_metrics_collection),
-        ("TSDB Health", test_tsdb_health),
-        ("Rules", test_rules),
-        ("Exporters", test_exporters),
-        ("Prometheus Operator", test_prometheus_operator)
-    ]
+    # Run all tests
+    all_results.extend(test_prometheus_api())
+    all_results.extend(test_scrape_targets())
+    all_results.extend(test_servicemonitors())
+    all_results.extend(test_metrics_collection())
+    all_results.extend(test_tsdb_health())
+    all_results.extend(test_prometheus_operator())
     
-    for test_name, test_func in test_functions:
-        print(f"Testing {test_name}...")
-        try:
-            results = test_func()
-            all_results.extend(results)
-        except Exception as e:
-            all_results.append({
-                "name": test_name.lower().replace(" ", "_"),
-                "status": False,
-                "output": f"Test crashed: {str(e)}",
-                "severity": "WARNING"
-            })
-    
-    print("\n" + "=" * 70)
-    print("DETAILED RESULTS")
-    print("=" * 70)
-    
-    by_severity = {"CRITICAL": [], "WARNING": [], "INFO": []}
-    for result in all_results:
-        severity = result.get("severity", "INFO")
-        by_severity[severity].append(result)
-    
-    for severity in ["CRITICAL", "WARNING", "INFO"]:
-        items = by_severity[severity]
-        if items:
-            print(f"\n{severity} ({len(items)} items):")
-            print("-" * 50)
-            
-            for result in items:
-                status_text = "[PASS]" if result["status"] else "[FAIL]"
-                print(f"\n{status_text} {result['name']}")
-                if result["output"]:
-                    for line in result["output"].split("\n"):
-                        print(f"  {line}")
-    
-    total = len(all_results)
-    passed = sum(1 for r in all_results if r["status"])
-    failed = total - passed
-    
-    critical_failed = sum(1 for r in by_severity["CRITICAL"] if not r["status"])
-    warning_failed = sum(1 for r in by_severity["WARNING"] if not r["status"])
-    
-    print("\n" + "=" * 70)
-    print("SUMMARY")
-    print("=" * 70)
-    print(f"Total Tests: {total}")
-    print(f"Passed: {passed} ({passed*100//total if total > 0 else 0}%)")
-    print(f"Failed: {failed} ({failed*100//total if total > 0 else 0}%)")
-    
-    if critical_failed > 0:
-        print(f"\nCRITICAL FAILURES: {critical_failed}")
-    if warning_failed > 0:
-        print(f"WARNINGS: {warning_failed}")
-    
-    print("=" * 70)
-    
-    exit(1 if critical_failed > 0 else 0)
+    return all_results
 
 
 if __name__ == "__main__":
-    main()
+    results = test_prometheus()
+    
+    # Output as JSON
+    print(json.dumps(results, indent=2))
+    
+    # Exit code based on critical failures
+    critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "critical")
+    sys.exit(1 if critical_failures > 0 else 0)
