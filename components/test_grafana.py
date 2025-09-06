@@ -1,58 +1,109 @@
 #!/usr/bin/env python3
 """
-Grafana Health Check Script - Generic version
-Discovers and tests Grafana configuration dynamically
+Grafana Health Check Script - Structured version
+Tests Grafana configuration dynamically with JSON output format
+
+ENV VARS:
+  GRAFANA_NAMESPACE (default: grafana)
+  GRAFANA_ADMIN_PASSWORD (optional, for API auth)
+
+Output: JSON array of test results to stdout
+Each result: {
+  name, description, status (bool), severity (info|warning|critical), output
+}
 """
 
 import os
 import json
 import subprocess
-from typing import Dict, List, Optional
+import sys
+import time
+from typing import Dict, List, Optional, Any
+from datetime import datetime
 
-def run_command(command: str, timeout: int = 10) -> Dict:
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
+NAMESPACE = os.getenv('GRAFANA_NAMESPACE', 'grafana')
+ADMIN_PASSWORD = os.getenv('GRAFANA_ADMIN_PASSWORD', 'admin')
+
+# Try multiple common passwords
+DEFAULT_PASSWORDS = ["default_password", "admin", "prom-operator", ADMIN_PASSWORD]
+
+# ------------------------------------------------------------
+# Utilities
+# ------------------------------------------------------------
+
+def run_command(command: str, env: Optional[Dict[str, str]] = None, timeout: int = 10) -> Dict[str, Any]:
     """Run shell command and return results"""
     try:
         completed = subprocess.run(
             command,
             shell=True,
+            env=env or os.environ.copy(),
             capture_output=True,
             text=True,
             timeout=timeout
         )
         return {
-            "exit_code": completed.returncode,
-            "stdout": completed.stdout.strip(),
-            "stderr": completed.stderr.strip()
+            "stdout": (completed.stdout or '').strip(),
+            "stderr": (completed.stderr or '').strip(),
+            "exit_code": completed.returncode
         }
     except subprocess.TimeoutExpired:
-        return {"exit_code": 124, "stdout": "", "stderr": "Timeout"}
+        return {"stdout": "", "stderr": "Timeout", "exit_code": 124}
+
+
+def ok(proc: Dict[str, Any]) -> bool:
+    """Check if command executed successfully"""
+    return proc.get("exit_code", 1) == 0
+
+
+def create_test_result(name: str, description: str, passed: bool, output: str, severity: str = "INFO") -> Dict[str, Any]:
+    """Create standardized test result"""
+    return {
+        "name": name,
+        "description": description,
+        "status": bool(passed),
+        "output": output,
+        "severity": severity.lower(),
+    }
 
 
 def get_grafana_pod(namespace: str) -> Optional[str]:
     """Get Grafana pod name"""
     cmd = f"kubectl get pods -n {namespace} --field-selector=status.phase=Running -o name | grep grafana | head -1 | cut -d'/' -f2"
     result = run_command(cmd)
-    return result['stdout'] if result['exit_code'] == 0 and result['stdout'] else None
+    return result['stdout'] if ok(result) and result['stdout'] else None
 
 
-def test_grafana_pod() -> List[Dict]:
+# ------------------------------------------------------------
+# Test Functions
+# ------------------------------------------------------------
+
+def test_grafana_pod() -> List[Dict[str, Any]]:
     """Check Grafana pod status"""
-    namespace = os.getenv('GRAFANA_NAMESPACE', 'grafana')
+    description = "Check Grafana pod health and readiness"
+    tests = []
     
-    cmd = f"kubectl get pods -n {namespace} -o json"
+    cmd = f"kubectl get pods -n {NAMESPACE} -o json"
     result = run_command(cmd)
     
-    if result['exit_code'] != 0:
-        return [{
-            "name": "grafana_pod_health",
-            "passed": False,
-            "output": "Failed to get pods",
-            "severity": "CRITICAL"
-        }]
+    if not ok(result):
+        tests.append(create_test_result(
+            "grafana_pod_health",
+            description,
+            False,
+            f"Failed to get pods: {result['stderr']}",
+            "CRITICAL"
+        ))
+        return tests
     
     try:
         data = json.loads(result['stdout'])
         grafana_pods = []
+        unhealthy_pods = []
         
         for pod in data.get("items", []):
             if "grafana" in pod["metadata"]["name"].lower():
@@ -62,44 +113,55 @@ def test_grafana_pod() -> List[Dict]:
                 
                 if status == "Running" and ready:
                     grafana_pods.append(name)
+                else:
+                    unhealthy_pods.append(f"{name}({status})")
         
         if grafana_pods:
-            return [{
-                "name": "grafana_pod_health",
-                "passed": True,
-                "output": f"Running: {', '.join(grafana_pods)}",
-                "severity": "LOW"
-            }]
+            tests.append(create_test_result(
+                "grafana_pod_health",
+                description,
+                True,
+                f"Running pods: {', '.join(grafana_pods)}",
+                "INFO"
+            ))
         else:
-            return [{
-                "name": "grafana_pod_health",
-                "passed": False,
-                "output": "No healthy Grafana pods",
-                "severity": "CRITICAL"
-            }]
-    except:
-        return [{
-            "name": "grafana_pod_health",
-            "passed": False,
-            "output": "Failed to parse pod data",
-            "severity": "CRITICAL"
-        }]
-
-
-def test_grafana_service() -> List[Dict]:
-    """Check Grafana service"""
-    namespace = os.getenv('GRAFANA_NAMESPACE', 'grafana')
+            tests.append(create_test_result(
+                "grafana_pod_health",
+                description,
+                False,
+                f"No healthy Grafana pods. Found: {', '.join(unhealthy_pods) if unhealthy_pods else 'none'}",
+                "CRITICAL"
+            ))
+            
+    except Exception as e:
+        tests.append(create_test_result(
+            "grafana_pod_health",
+            description,
+            False,
+            f"Failed to parse pod data: {str(e)}",
+            "CRITICAL"
+        ))
     
-    cmd = f"kubectl get svc grafana -n {namespace} -o json"
+    return tests
+
+
+def test_grafana_service() -> List[Dict[str, Any]]:
+    """Check Grafana service and endpoints"""
+    description = "Check Grafana service configuration and endpoints"
+    tests = []
+    
+    cmd = f"kubectl get svc grafana -n {NAMESPACE} -o json"
     result = run_command(cmd)
     
-    if result['exit_code'] != 0:
-        return [{
-            "name": "grafana_service",
-            "passed": False,
-            "output": "Service not found",
-            "severity": "CRITICAL"
-        }]
+    if not ok(result):
+        tests.append(create_test_result(
+            "grafana_service",
+            description,
+            False,
+            f"Service not found: {result['stderr']}",
+            "CRITICAL"
+        ))
+        return tests
     
     try:
         data = json.loads(result['stdout'])
@@ -107,90 +169,124 @@ def test_grafana_service() -> List[Dict]:
         ports = [f"{p['port']}/{p.get('targetPort', '?')}" for p in data["spec"]["ports"]]
         
         # Check endpoints
-        ep_cmd = f"kubectl get endpoints grafana -n {namespace} -o json"
+        ep_cmd = f"kubectl get endpoints grafana -n {NAMESPACE} -o json"
         ep_result = run_command(ep_cmd)
         ep_count = 0
         
-        if ep_result['exit_code'] == 0:
+        if ok(ep_result):
             ep_data = json.loads(ep_result['stdout'])
             for subset in ep_data.get("subsets", []):
                 ep_count += len(subset.get("addresses", []))
         
-        return [{
-            "name": "grafana_service",
-            "passed": ep_count > 0,
-            "output": f"Type: {svc_type}, Ports: {ports}, Endpoints: {ep_count}",
-            "severity": "CRITICAL" if ep_count == 0 else "LOW"
-        }]
-    except:
-        return [{
-            "name": "grafana_service",
-            "passed": False,
-            "output": "Failed to check service",
-            "severity": "WARNING"
-        }]
+        if ep_count > 0:
+            tests.append(create_test_result(
+                "grafana_service",
+                description,
+                True,
+                f"Type: {svc_type}, Ports: {ports}, Active endpoints: {ep_count}",
+                "INFO"
+            ))
+        else:
+            tests.append(create_test_result(
+                "grafana_service",
+                description,
+                False,
+                f"Service exists but no active endpoints (Type: {svc_type}, Ports: {ports})",
+                "CRITICAL"
+            ))
+            
+    except Exception as e:
+        tests.append(create_test_result(
+            "grafana_service",
+            description,
+            False,
+            f"Failed to check service: {str(e)}",
+            "WARNING"
+        ))
+    
+    return tests
 
 
-def test_grafana_api() -> List[Dict]:
-    """Test Grafana API"""
-    namespace = os.getenv('GRAFANA_NAMESPACE', 'grafana')
-    pod = get_grafana_pod(namespace)
+def test_grafana_api() -> List[Dict[str, Any]]:
+    """Test Grafana API health endpoint"""
+    description = "Check Grafana API health status"
+    tests = []
+    
+    pod = get_grafana_pod(NAMESPACE)
     
     if not pod:
-        return [{
-            "name": "grafana_api",
-            "passed": False,
-            "output": "No running pod",
-            "severity": "CRITICAL"
-        }]
+        tests.append(create_test_result(
+            "grafana_api_health",
+            description,
+            False,
+            "No running Grafana pod found",
+            "CRITICAL"
+        ))
+        return tests
     
-    cmd = f"kubectl exec -n {namespace} {pod} -- wget -qO- --timeout=5 http://localhost:3000/api/health"
-    result = run_command(cmd)
+    cmd = f"kubectl exec -n {NAMESPACE} {pod} -- wget -qO- --timeout=5 http://localhost:3000/api/health"
+    result = run_command(cmd, timeout=15)
     
-    if result['exit_code'] == 0 and result['stdout']:
+    if ok(result) and result['stdout']:
         try:
             data = json.loads(result['stdout'])
-            return [{
-                "name": "grafana_api",
-                "passed": True,
-                "output": f"Database: {data.get('database', '?')}, Version: {data.get('version', '?')}",
-                "severity": "LOW"
-            }]
-        except:
-            pass
+            db_status = data.get('database', 'unknown')
+            version = data.get('version', 'unknown')
+            tests.append(create_test_result(
+                "grafana_api_health",
+                description,
+                True,
+                f"API healthy - Database: {db_status}, Version: {version}",
+                "INFO"
+            ))
+        except Exception:
+            tests.append(create_test_result(
+                "grafana_api_health",
+                description,
+                True,
+                "API responding (non-JSON response)",
+                "INFO"
+            ))
+    else:
+        tests.append(create_test_result(
+            "grafana_api_health",
+            description,
+            False,
+            f"API not responding: {result['stderr'] or 'No response'}",
+            "CRITICAL"
+        ))
     
-    return [{
-        "name": "grafana_api",
-        "passed": False,
-        "output": "API not responding",
-        "severity": "CRITICAL"
-    }]
+    return tests
 
 
-def test_datasources() -> List[Dict]:
-    """Test datasources"""
-    namespace = os.getenv('GRAFANA_NAMESPACE', 'grafana')
-    pod = get_grafana_pod(namespace)
+def test_datasources() -> List[Dict[str, Any]]:
+    """Test configured datasources"""
+    description = "Check configured datasources in Grafana"
+    tests = []
+    
+    pod = get_grafana_pod(NAMESPACE)
     
     if not pod:
-        return [{
-            "name": "grafana_datasources",
-            "passed": False,
-            "output": "No pod to check",
-            "severity": "WARNING"
-        }]
+        tests.append(create_test_result(
+            "grafana_datasources",
+            description,
+            False,
+            "No pod available to check datasources",
+            "WARNING"
+        ))
+        return tests
     
-    # Try API with correct password
-    passwords = ["default_password", "admin", "prom-operator"]
     datasources = []
+    auth_worked = False
     
-    for pwd in passwords:
-        cmd = f"kubectl exec -n {namespace} {pod} -- curl -s -u admin:{pwd} http://localhost:3000/api/datasources"
-        result = run_command(cmd)
+    for pwd in DEFAULT_PASSWORDS:
+        cmd = f"kubectl exec -n {NAMESPACE} {pod} -- curl -s -u admin:{pwd} http://localhost:3000/api/datasources"
+        result = run_command(cmd, timeout=15)
         
-        if result['exit_code'] == 0 and result['stdout'].startswith('['):
+        if ok(result) and result['stdout'].startswith('['):
             try:
                 ds_list = json.loads(result['stdout'])
+                auth_worked = True
                 for ds in ds_list:
                     datasources.append({
                         "name": ds["name"],
@@ -198,88 +294,106 @@ def test_datasources() -> List[Dict]:
                         "default": ds.get("isDefault", False)
                     })
                 break
-            except:
+            except Exception:
                 pass
     
     if datasources:
         info = [f"{ds['name']}({ds['type']}{'*' if ds['default'] else ''})" for ds in datasources]
-        return [{
-            "name": "grafana_datasources",
-            "passed": True,
-            "output": f"Found {len(datasources)}: {', '.join(info)}",
-            "severity": "LOW"
-        }]
+        tests.append(create_test_result(
+            "grafana_datasources",
+            description,
+            True,
+            f"Found {len(datasources)} datasource(s): {', '.join(info)}",
+            "INFO"
+        ))
+    elif auth_worked:
+        tests.append(create_test_result(
+            "grafana_datasources",
+            description,
+            True,
+            "No datasources configured",
+            "WARNING"
+        ))
     else:
-        return [{
-            "name": "grafana_datasources",
-            "passed": False,
-            "output": "No datasources found or auth failed",
-            "severity": "WARNING"
-        }]
+        tests.append(create_test_result(
+            "grafana_datasources",
+            description,
+            False,
+            "Could not authenticate to check datasources",
+            "WARNING"
+        ))
+    
+    return tests
 
 
-def test_datasource_health() -> List[Dict]:
-    """Test datasource health"""
-    namespace = os.getenv('GRAFANA_NAMESPACE', 'grafana')
-    pod = get_grafana_pod(namespace)
+def test_datasource_health() -> List[Dict[str, Any]]:
+    """Test datasource connectivity"""
+    description = "Check datasource health and connectivity"
+    tests = []
+    
+    pod = get_grafana_pod(NAMESPACE)
     
     if not pod:
-        return [{
-            "name": "datasource_health",
-            "passed": False,
-            "output": "No pod to test",
-            "severity": "WARNING"
-        }]
+        tests.append(create_test_result(
+            "datasource_health",
+            description,
+            False,
+            "No pod available to test datasources",
+            "WARNING"
+        ))
+        return tests
     
     health_status = []
-    passwords = ["default_password", "admin", "prom-operator"]
+    datasource_types = ["prometheus", "loki", "tempo", "elasticsearch"]
     
-    for pwd in passwords:
-        # Test Prometheus health
-        cmd = f"kubectl exec -n {namespace} {pod} -- curl -s -u admin:{pwd} http://localhost:3000/api/datasources/uid/prometheus/health"
-        result = run_command(cmd)
+    for pwd in DEFAULT_PASSWORDS:
+        auth_worked = False
         
-        if result['exit_code'] == 0 and '"status":"OK"' in result['stdout']:
-            health_status.append("Prometheus: OK")
+        for ds_type in datasource_types:
+            cmd = f"kubectl exec -n {NAMESPACE} {pod} -- curl -s -u admin:{pwd} http://localhost:3000/api/datasources/uid/{ds_type}/health"
+            result = run_command(cmd, timeout=10)
             
-            # Test Loki
-            cmd = f"kubectl exec -n {namespace} {pod} -- curl -s -u admin:{pwd} http://localhost:3000/api/datasources/uid/loki/health"
-            result = run_command(cmd)
-            
-            if '"status":"OK"' in result['stdout']:
-                health_status.append("Loki: OK")
-            else:
-                health_status.append("Loki: Failed")
+            if ok(result) and result['stdout']:
+                auth_worked = True
+                if '"status":"OK"' in result['stdout']:
+                    health_status.append(f"{ds_type.capitalize()}: OK")
+                elif '"status"' in result['stdout']:
+                    health_status.append(f"{ds_type.capitalize()}: Failed")
+        
+        if auth_worked:
             break
     
     if health_status:
-        return [{
-            "name": "datasource_health",
-            "passed": True,
-            "output": ", ".join(health_status),
-            "severity": "LOW"
-        }]
+        tests.append(create_test_result(
+            "datasource_health",
+            description,
+            True,
+            ", ".join(health_status),
+            "INFO"
+        ))
     else:
-        return [{
-            "name": "datasource_health",
-            "passed": False,
-            "output": "Could not verify datasource health",
-            "severity": "WARNING"
-        }]
+        tests.append(create_test_result(
+            "datasource_health",
+            description,
+            False,
+            "Could not verify datasource health (auth failed or no datasources)",
+            "WARNING"
+        ))
+    
+    return tests
 
 
-def discover_services() -> Dict:
-    """Discover actual services in cluster"""
+def discover_services() -> Dict[str, Dict[str, Any]]:
+    """Discover potential datasource services in cluster"""
     services = {}
     
-    # Get all services that might be datasources
-    namespaces = ["prometheus", "loki", "tempo", "monitoring", "elastic", "grafana"]
+    namespaces = ["prometheus", "loki", "tempo", "monitoring", "elastic", "grafana", "observability"]
     
     for ns in namespaces:
         cmd = f"kubectl get svc -n {ns} -o json 2>/dev/null"
-        result = run_command(cmd)
+        result = run_command(cmd, timeout=10)
         
-        if result['exit_code'] == 0:
+        if ok(result):
             try:
                 data = json.loads(result['stdout'])
                 for svc in data.get("items", []):
@@ -297,217 +411,311 @@ def discover_services() -> Dict:
                         svc_type = "tempo"
                     elif "elastic" in name.lower() or "opensearch" in name.lower():
                         svc_type = "elasticsearch"
+                    elif "influx" in name.lower():
+                        svc_type = "influxdb"
                     
                     if svc_type != "unknown":
                         key = f"{name}.{namespace}"
                         services[key] = {
                             "type": svc_type,
                             "ports": ports,
-                            "namespace": namespace
+                            "namespace": namespace,
+                            "name": name
                         }
-            except:
+            except Exception:
                 pass
     
     return services
 
 
-def test_connectivity() -> List[Dict]:
-    """Test connectivity to discovered services"""
-    namespace = os.getenv('GRAFANA_NAMESPACE', 'grafana')
-    pod = get_grafana_pod(namespace)
+def test_connectivity() -> List[Dict[str, Any]]:
+    """Test connectivity to discovered datasource services"""
+    description = "Check network connectivity to potential datasources"
+    tests = []
+    
+    pod = get_grafana_pod(NAMESPACE)
     
     if not pod:
-        return [{
-            "name": "connectivity",
-            "passed": False,
-            "output": "No Grafana pod to test from",
-            "severity": "WARNING"
-        }]
+        tests.append(create_test_result(
+            "datasource_connectivity",
+            description,
+            False,
+            "No Grafana pod available for connectivity test",
+            "WARNING"
+        ))
+        return tests
     
     services = discover_services()
+    
+    if not services:
+        tests.append(create_test_result(
+            "datasource_connectivity",
+            description,
+            True,
+            "No datasource services discovered in cluster",
+            "INFO"
+        ))
+        return tests
+    
     reachable = []
+    unreachable = []
     
     for svc_name, svc_info in services.items():
         if svc_info["ports"]:
             port = svc_info["ports"][0]
-            cmd = f"kubectl exec -n {namespace} {pod} -- nc -zv -w2 {svc_name} {port} 2>&1"
-            result = run_command(cmd, timeout=3)
+            cmd = f"kubectl exec -n {NAMESPACE} {pod} -- nc -zv -w2 {svc_name} {port} 2>&1"
+            result = run_command(cmd, timeout=5)
             
-            if result['exit_code'] == 0 or "succeeded" in result['stdout'].lower():
-                reachable.append(f"{svc_info['type']}:{svc_name}:{port}")
+            if ok(result) or "succeeded" in result['stdout'].lower():
+                reachable.append(f"{svc_info['type']}:{svc_info['name']}:{port}")
+            else:
+                unreachable.append(f"{svc_info['type']}:{svc_info['name']}")
     
     if reachable:
-        return [{
-            "name": "connectivity",
-            "passed": True,
-            "output": f"Reachable: {', '.join(reachable[:5])}",
-            "severity": "LOW"
-        }]
+        # Limit output to first 5 for readability
+        output = f"Reachable: {', '.join(reachable[:5])}"
+        if len(reachable) > 5:
+            output += f" (+{len(reachable)-5} more)"
+        tests.append(create_test_result(
+            "datasource_connectivity",
+            description,
+            True,
+            output,
+            "INFO"
+        ))
     else:
-        return [{
-            "name": "connectivity",
-            "passed": True,
-            "output": f"Found {len(services)} services, none reachable",
-            "severity": "WARNING"
-        }]
-
-
-def test_dashboards() -> List[Dict]:
-    """Test dashboards"""
-    namespace = os.getenv('GRAFANA_NAMESPACE', 'grafana')
-    pod = get_grafana_pod(namespace)
+        tests.append(create_test_result(
+            "datasource_connectivity",
+            description,
+            False,
+            f"Found {len(services)} service(s), none reachable",
+            "WARNING"
+        ))
     
+    return tests
+
+
+def test_dashboards() -> List[Dict[str, Any]]:
+    """Test dashboard availability"""
+    description = "Check configured dashboards"
+    tests = []
+    
+    pod = get_grafana_pod(NAMESPACE)
     dashboard_count = 0
     dashboard_names = []
     
-    # Try API with correct password
     if pod:
-        passwords = ["default_password", "admin", "prom-operator"]
-        
-        for pwd in passwords:
-            cmd = f"kubectl exec -n {namespace} {pod} -- curl -s -u admin:{pwd} 'http://localhost:3000/api/search?type=dash-db'"
-            result = run_command(cmd)
+        # Try API first
+        for pwd in DEFAULT_PASSWORDS:
+            cmd = f"kubectl exec -n {NAMESPACE} {pod} -- curl -s -u admin:{pwd} 'http://localhost:3000/api/search?type=dash-db'"
+            result = run_command(cmd, timeout=15)
             
-            if result['exit_code'] == 0 and result['stdout'].startswith('['):
+            if ok(result) and result['stdout'].startswith('['):
                 try:
                     dashboards = json.loads(result['stdout'])
                     dashboard_count = len(dashboards)
                     dashboard_names = [d["title"] for d in dashboards[:5]]
                     break
-                except:
+                except Exception:
                     pass
-    
-    # Also check filesystem
-    if pod and dashboard_count == 0:
-        cmd = f"kubectl exec -n {namespace} {pod} -- find /var/lib/grafana/dashboards -name '*.json' -type f 2>/dev/null | wc -l"
-        result = run_command(cmd)
         
-        if result['exit_code'] == 0 and result['stdout'].isdigit():
-            dashboard_count = int(result['stdout'])
+        # Fallback to filesystem check
+        if dashboard_count == 0:
+            cmd = f"kubectl exec -n {NAMESPACE} {pod} -- find /var/lib/grafana/dashboards -name '*.json' -type f 2>/dev/null | wc -l"
+            result = run_command(cmd, timeout=10)
+            
+            if ok(result) and result['stdout'].isdigit():
+                dashboard_count = int(result['stdout'])
     
     if dashboard_count > 0:
-        output = f"{dashboard_count} dashboards"
+        output = f"Found {dashboard_count} dashboard(s)"
         if dashboard_names:
             output += f": {', '.join(dashboard_names)}"
             if dashboard_count > 5:
                 output += "..."
-        return [{
-            "name": "dashboards",
-            "passed": True,
-            "output": output,
-            "severity": "LOW"
-        }]
+        tests.append(create_test_result(
+            "grafana_dashboards",
+            description,
+            True,
+            output,
+            "INFO"
+        ))
     else:
-        return [{
-            "name": "dashboards",
-            "passed": True,
-            "output": "No dashboards",
-            "severity": "WARNING"
-        }]
+        tests.append(create_test_result(
+            "grafana_dashboards",
+            description,
+            True,
+            "No dashboards configured",
+            "WARNING"
+        ))
+    
+    return tests
 
 
-def test_logs() -> List[Dict]:
-    """Check logs for errors"""
-    namespace = os.getenv('GRAFANA_NAMESPACE', 'grafana')
-    pod = get_grafana_pod(namespace)
+def test_logs(time_window_minutes: int = 5) -> List[Dict[str, Any]]:
+    """Check Grafana logs for errors"""
+    description = f"Check Grafana logs for errors (last {time_window_minutes}m)"
+    tests = []
+    
+    pod = get_grafana_pod(NAMESPACE)
     
     if not pod:
-        return [{
-            "name": "logs",
-            "passed": False,
-            "output": "No pod",
-            "severity": "WARNING"
-        }]
+        tests.append(create_test_result(
+            "grafana_logs",
+            description,
+            False,
+            "No pod available to check logs",
+            "WARNING"
+        ))
+        return tests
     
-    cmd = f"kubectl logs -n {namespace} {pod} --tail=500"
-    result = run_command(cmd)
+    cmd = f"kubectl logs -n {NAMESPACE} {pod} --tail=500"
+    result = run_command(cmd, timeout=15)
     
-    if result['exit_code'] != 0:
-        return [{
-            "name": "logs",
-            "passed": False,
-            "output": "Cannot read logs",
-            "severity": "WARNING"
-        }]
+    if not ok(result):
+        tests.append(create_test_result(
+            "grafana_logs",
+            description,
+            False,
+            f"Cannot read logs: {result['stderr']}",
+            "WARNING"
+        ))
+        return tests
     
     errors = 0
+    critical_errors = 0
+    error_samples = []
+    
     for line in result['stdout'].split('\n'):
         if '"level":"error"' in line or 'level=error' in line.lower():
+            # Filter out non-errors
             if not any(x in line.lower() for x in ['error=<nil>', 'error=null', 'errors=0']):
                 errors += 1
+                if errors <= 3:  # Keep first 3 error samples
+                    error_samples.append(line[:100])
+                
+                # Check for critical errors
+                if any(x in line.lower() for x in ['panic', 'fatal', 'critical']):
+                    critical_errors += 1
     
-    if errors > 50:
-        return [{
-            "name": "logs",
-            "passed": False,
-            "output": f"{errors} errors",
-            "severity": "CRITICAL"
-        }]
+    if critical_errors > 0:
+        tests.append(create_test_result(
+            "grafana_logs",
+            description,
+            False,
+            f"Found {errors} error(s) including {critical_errors} critical",
+            "CRITICAL"
+        ))
+    elif errors > 50:
+        tests.append(create_test_result(
+            "grafana_logs",
+            description,
+            False,
+            f"Found {errors} error(s) in logs",
+            "WARNING"
+        ))
     elif errors > 10:
-        return [{
-            "name": "logs",
-            "passed": True,
-            "output": f"{errors} errors",
-            "severity": "WARNING"
-        }]
+        tests.append(create_test_result(
+            "grafana_logs",
+            description,
+            True,
+            f"Found {errors} error(s) in logs (within threshold)",
+            "WARNING"
+        ))
     else:
-        return [{
-            "name": "logs",
-            "passed": True,
-            "output": f"{errors} errors",
-            "severity": "LOW"
-        }]
+        tests.append(create_test_result(
+            "grafana_logs",
+            description,
+            True,
+            f"Found {errors} error(s) in logs",
+            "INFO"
+        ))
+    
+    return tests
+
+
+# ------------------------------------------------------------
+# Main test runner
+# ------------------------------------------------------------
+
+def test_grafana() -> List[Dict[str, Any]]:
+    """Run all Grafana health checks"""
+    start_time = time.time()
+    results = []
+    
+    # 1) Pod health - gateway test
+    pod_tests = test_grafana_pod()
+    results.extend(pod_tests)
+    
+    # Continue even if pods are unhealthy to gather more info
+    
+    # 2) Service configuration
+    results.extend(test_grafana_service())
+    
+    # 3) API health
+    api_tests = test_grafana_api()
+    results.extend(api_tests)
+    
+    # Only continue with detailed tests if API is responding
+    if any(t['status'] for t in api_tests):
+        # 4) Datasources
+        results.extend(test_datasources())
+        
+        # 5) Datasource health
+        results.extend(test_datasource_health())
+        
+        # 6) Network connectivity
+        results.extend(test_connectivity())
+        
+        # 7) Dashboards
+        results.extend(test_dashboards())
+    
+    # 8) Logs (always check)
+    results.extend(test_logs())
+    
+    # Add execution time
+    execution_time = time.time() - start_time
+    results.append(create_test_result(
+        "execution_time",
+        "Total execution time",
+        True,
+        f"{execution_time:.2f} seconds",
+        "INFO"
+    ))
+    
+    return results
 
 
 def main():
-    print("=" * 60)
-    print("GRAFANA HEALTH CHECK")
-    print("=" * 60)
-    
-    tests = [
-        test_grafana_pod,
-        test_grafana_service,
-        test_grafana_api,
-        test_datasources,
-        test_datasource_health,
-        test_connectivity,
-        test_dashboards,
-        test_logs
-    ]
-    
-    critical = 0
-    warning = 0
-    passed = 0
-    
-    for test in tests:
-        try:
-            results = test()
-            for r in results:
-                status = "✓" if r["passed"] else "✗"
-                print(f"\n{status} {r['name']}")
-                print(f"  {r['output']}")
-                
-                if not r["passed"] and r["severity"] == "CRITICAL":
-                    critical += 1
-                elif r["severity"] == "WARNING":
-                    warning += 1
-                else:
-                    passed += 1
-        except Exception as e:
-            print(f"\nError in {test.__name__}: {e}")
-    
-    print("\n" + "=" * 60)
-    print(f"Passed: {passed}, Warnings: {warning}, Critical: {critical}")
-    
-    if critical > 0:
-        print("Status: CRITICAL")
-        exit(1)
-    elif warning > 0:
-        print("Status: WARNING")
-        exit(0)
-    else:
-        print("Status: HEALTHY")
-        exit(0)
+    """Main entry point with JSON output"""
+    try:
+        results = test_grafana()
+        
+        # Output as JSON
+        print(json.dumps(results, indent=2))
+        
+        # Determine exit code based on severity
+        critical_count = sum(1 for r in results if not r['status'] and r['severity'] == 'critical')
+        warning_count = sum(1 for r in results if r['severity'] == 'warning')
+        
+        if critical_count > 0:
+            sys.exit(1)
+        elif warning_count > 0:
+            sys.exit(0)
+        else:
+            sys.exit(0)
+            
+    except Exception as e:
+        # Emergency fallback
+        error_result = [{
+            "name": "script_error",
+            "description": "Script execution error",
+            "status": False,
+            "output": str(e),
+            "severity": "critical"
+        }]
+        print(json.dumps(error_result, indent=2))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
