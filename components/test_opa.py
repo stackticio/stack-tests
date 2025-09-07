@@ -112,11 +112,38 @@ POLICIES = {
 # ------------------------------------------------------------
 
 def create_test_result(name: str, description: str, passed: bool, output: str, severity: str = "INFO") -> Dict[str, Any]:
+    """Create a test result with clear, actionable output messages"""
+    
+    # Enhance output messages for common scenarios
+    enhanced_output = output
+    
+    # Policy deployment issues
+    if "enabled in ENV but" in output:
+        policy_name = name.replace('_policy_deployment', '')
+        enhanced_output = f"Policy '{policy_name}' is configured in environment but not applied to cluster. Run: kubectl apply -f <{policy_name}_policy.yaml>"
+    
+    # Test failures
+    elif "was not rejected as expected" in output:
+        enhanced_output = f"ENFORCEMENT FAILURE: Non-compliant resource was allowed through. Check if policy is in 'deny' mode and webhook is working"
+    elif "Failed to create" in output and "compliant pod" in output:
+        if "denied the request" in output:
+            enhanced_output = f"UNEXPECTED REJECTION: Compliant resource was blocked. Review policy constraints and labels"
+        else:
+            enhanced_output = f"INFRASTRUCTURE ISSUE: Could not create test resource. Check cluster permissions and quotas"
+    
+    # Webhook issues  
+    elif "failurePolicy: Ignore" in output:
+        enhanced_output = "SECURITY RISK: Webhook set to 'Ignore' - violations will be allowed if Gatekeeper fails. Run: kubectl patch validatingwebhookconfigurations gatekeeper-validating-webhook-configuration --type='json' -p='[{\"op\": \"replace\", \"path\": \"/webhooks/0/failurePolicy\", \"value\": \"Fail\"}]'"
+    
+    # Violations
+    elif "violation(s)" in output and "Found" in output:
+        enhanced_output = f"{output}. These resources violate current policies but existed before enforcement. Consider cleaning them up"
+    
     return {
         "name": name,
         "description": description,
         "status": bool(passed),
-        "output": output,
+        "output": enhanced_output,
         "severity": severity.lower(),
     }
 
@@ -417,7 +444,7 @@ def test_probes_policy_with_config(config: Dict[str, Any]) -> List[Dict[str, Any
         label_lines.append(f"    {key}: {value}")
     labels_yaml = '\n'.join(label_lines) if label_lines else "    test: pod"
     
-    # Positive test - Pod WITH required labels AND probes (should succeed)
+    # Positive test - Pod WITH required labels AND fully compliant with ALL policies
     positive_yaml = f"""
 apiVersion: v1
 kind: Pod
@@ -427,9 +454,12 @@ metadata:
   labels:
 {labels_yaml}
 spec:
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
   containers:
   - name: test-container
-    image: nginx:1.21
+    image: bitnami/postgresql:15.2.0
     livenessProbe:
       httpGet:
         path: /
@@ -442,6 +472,20 @@ spec:
         port: 80
       initialDelaySeconds: 5
       periodSeconds: 10
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+        ephemeral-storage: "1Gi"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
 """
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
@@ -454,9 +498,9 @@ spec:
     if ok(r):
         tests.append(create_test_result(
             f"probes_positive_{config['name'][:20]}",
-            f"Probes policy - positive test (labels: {labels})",
+            f"Probes policy - positive test (fully compliant, labels: {labels})",
             True,
-            f"Pod with probes created successfully in {test_ns}",
+            f"Fully compliant pod created successfully in {test_ns}",
             "INFO"
         ))
         # Cleanup
@@ -465,9 +509,9 @@ spec:
         error_msg = r.get('combined', '') or f"Exit code: {r.get('exit_code', 'unknown')}"
         tests.append(create_test_result(
             f"probes_positive_{config['name'][:20]}",
-            f"Probes policy - positive test (labels: {labels})",
+            f"Probes policy - positive test (fully compliant, labels: {labels})",
             False,
-            f"Failed to create pod with probes: {error_msg[:200]}",
+            f"Failed to create fully compliant pod: {error_msg[:200]}",
             "WARNING"
         ))
     
@@ -483,9 +527,26 @@ metadata:
   labels:
 {labels_yaml}
 spec:
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
   containers:
   - name: test-container
-    image: nginx:1.21
+    image: bitnami/postgresql:15.2.0
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+        ephemeral-storage: "1Gi"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
 """
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
@@ -520,7 +581,7 @@ spec:
                 f"probes_negative_{config['name'][:20]}",
                 f"Probes policy - negative test (no probes, labels: {labels})",
                 False,
-                f"Pod creation failed but not due to policy: {error_msg[:200]}",
+                f"Pod creation failed but not due to probes policy: {error_msg[:200]}",
                 "WARNING"
             ))
     
