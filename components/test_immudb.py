@@ -1,19 +1,46 @@
 #!/usr/bin/env python3
 """
-ImmuDB Test Script
-Tests ImmuDB connectivity, databases, users, and health status
+OPA Gatekeeper Policy Test Script
+- Tests Gatekeeper connectivity, policies enforcement, constraint templates, and violations
+- Designed for OPA Gatekeeper in Kubernetes clusters
+
+ENV VARS
+  OPA_HOST (default: opa.opa.svc.cluster.local)
+  OPA_NS (default: opa)
+  OPA_PORT (default: 8181)
+  POLICY_LABEL_DENY (true/false)
+  POLICY_PROBES (true/false)
+  POLICY_RESOURCE (true/false)
+  POLICY_SECURITY_CONTEXT (true/false)
+  POLICY_POD_LEVEL_SECURITY (true/false)
+  POLICY_IMAGE (true/false)
+
+Output: JSON array of test results to stdout
+Each result: {
+  name, description, status (bool), severity (info|warning|critical), output
+}
 """
 
 import os
 import json
+import time
 import subprocess
+import sys
 import re
-import base64
-from typing import Dict, List, Any
+import yaml
+from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime
+import tempfile
+import uuid
 
-def run_command(command: str, env: Dict = None, timeout: int = 10) -> Dict:
-    """Helper to run a shell command and capture stdout/stderr/exit code"""
+# ------------------------------------------------------------
+# Utilities & configuration
+# ------------------------------------------------------------
+
+def run_command(command: str, env: Optional[Dict[str, str]] = None, timeout: int = 30) -> Dict[str, Any]:
+    """Run a shell command and capture stdout/stderr/exit code."""
     try:
+        # Combine stderr and stdout for better error capture
         completed = subprocess.run(
             command,
             shell=True,
@@ -22,842 +49,1408 @@ def run_command(command: str, env: Dict = None, timeout: int = 10) -> Dict:
             text=True,
             timeout=timeout
         )
+        
+        # If stderr contains useful info, combine it with stdout
+        output = completed.stdout or ''
+        if completed.stderr:
+            output = f"{output}\nSTDERR: {completed.stderr}".strip()
+            
         return {
-            "exit_code": completed.returncode,
-            "stdout": completed.stdout.strip(),
-            "stderr": completed.stderr.strip()
+            "stdout": output,
+            "stderr": completed.stderr or '',
+            "combined": output,
+            "exit_code": completed.returncode
         }
     except subprocess.TimeoutExpired:
-        return {"exit_code": 124, "stdout": "", "stderr": "Timeout"}
+        return {"stdout": "", "stderr": "Timeout", "combined": "Timeout", "exit_code": 124}
 
+def ok(proc: Dict[str, Any]) -> bool:
+    return proc.get("exit_code", 1) == 0
 
-def test_immudb_connectivity() -> List[Dict]:
-    """Test basic ImmuDB connectivity"""
-    host = os.getenv('IMMUDB_HOST', 'immudb-grpc.immudb.svc.cluster.local')
-    port = os.getenv('IMMUDB_PORT', '3322')
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
-    
-    # Get ImmuDB pod
-    pod_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_result = run_command(pod_cmd)
-    
-    if pod_result['exit_code'] != 0 or not pod_result['stdout']:
-        return [{
-            "name": "immudb_connectivity",
-            "description": "Test basic ImmuDB connectivity",
-            "passed": False,
-            "output": f"Could not find ImmuDB pod in namespace {namespace}",
-            "severity": "CRITICAL"
-        }]
-    
-    pod_name = pod_result['stdout']
-    
-    # Test connectivity using immuadmin status
-    status_cmd = f"kubectl exec -n {namespace} {pod_name} -- immuadmin status --address {host} --port {port} 2>&1"
-    result = run_command(status_cmd)
-    
-    if result['exit_code'] == 0 or 'version' in result['stdout'].lower() or 'status' in result['stdout'].lower():
-        # Extract version if available
-        version_info = ""
-        if 'version' in result['stdout'].lower():
-            lines = result['stdout'].split('\n')
-            for line in lines:
-                if 'version' in line.lower():
-                    version_info = f" | {line.strip()}"
-                    break
-        
-        return [{
-            "name": "immudb_connectivity",
-            "description": "Test basic ImmuDB connectivity",
-            "passed": True,
-            "output": f"ImmuDB is running at {host}:{port}{version_info}",
-            "severity": "LOW"
-        }]
-    
-    # Alternative: check metrics endpoint
-    metrics_cmd = f"kubectl exec -n {namespace} {pod_name} -- curl -s http://localhost:9497/metrics 2>&1 | head -5"
-    metrics_result = run_command(metrics_cmd, timeout=5)
-    
-    if metrics_result['exit_code'] == 0 and 'immudb' in metrics_result['stdout'].lower():
-        return [{
-            "name": "immudb_connectivity",
-            "description": "Test basic ImmuDB connectivity",
-            "passed": True,
-            "output": f"ImmuDB is running at {host}:{port} (verified via metrics)",
-            "severity": "LOW"
-        }]
-    
-    return [{
-        "name": "immudb_connectivity",
-        "description": "Test basic ImmuDB connectivity",
-        "passed": False,
-        "output": f"ImmuDB connectivity failed at {host}:{port} - {result.get('stderr', 'Service not responding')}",
-        "severity": "CRITICAL"
-    }]
+# ------------------------------------------------------------
+# Configuration from environment
+# ------------------------------------------------------------
 
+OPA_HOST = os.getenv('OPA_HOST', 'opa.opa.svc.cluster.local')
+OPA_NS = os.getenv('OPA_NS', 'opa')
+OPA_PORT = os.getenv('OPA_PORT', '8181')
 
-def test_immudb_health() -> List[Dict]:
-    """Test ImmuDB health via metrics endpoint"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
+# Auto-detect where Gatekeeper is actually running
+def detect_gatekeeper_namespace():
+    """Detect the Gatekeeper namespace - could be same as OPA_NS or different"""
+    # First check if it's in OPA_NS
+    cmd = f"kubectl get pods -n {OPA_NS} --no-headers 2>/dev/null | grep -E 'gatekeeper-audit|gatekeeper-controller'"
+    r = run_command(cmd, timeout=5)
+    if ok(r) and r['stdout']:
+        return OPA_NS
     
-    # Get ImmuDB pod
-    pod_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_result = run_command(pod_cmd)
+    # Otherwise check other common namespaces
+    possible_namespaces = ['gatekeeper-system', 'gatekeeper']
+    for ns in possible_namespaces:
+        cmd = f"kubectl get pods -n {ns} --no-headers 2>/dev/null | grep -E 'gatekeeper-audit|gatekeeper-controller'"
+        r = run_command(cmd, timeout=5)
+        if ok(r) and r['stdout']:
+            return ns
     
-    if pod_result['exit_code'] != 0 or not pod_result['stdout']:
-        return [{
-            "name": "immudb_health_metrics",
-            "description": "Test ImmuDB health via metrics endpoint",
-            "passed": False,
-            "output": "Could not find ImmuDB pod",
-            "severity": "CRITICAL"
-        }]
-    
-    pod_name = pod_result['stdout']
-    
-    # Check health metrics
-    metrics_cmd = f"kubectl exec -n {namespace} {pod_name} -- curl -s http://localhost:9497/metrics 2>&1 | grep -E 'immudb_|go_memstats' | head -20"
-    result = run_command(metrics_cmd)
-    
-    if result['exit_code'] == 0 and 'immudb' in result['stdout']:
-        # Parse key metrics
-        metrics_info = []
-        
-        # Look for specific metrics
-        if 'immudb_version_info' in result['stdout']:
-            metrics_info.append("Version info")
-        if 'immudb_up' in result['stdout']:
-            metrics_info.append("Up status")
-        if 'go_memstats_alloc_bytes' in result['stdout']:
-            # Try to extract memory value
-            for line in result['stdout'].split('\n'):
-                if 'go_memstats_alloc_bytes' in line:
-                    parts = line.split()
-                    if len(parts) > 1 and parts[-1].replace('.', '').replace('e', '').replace('+', '').isdigit():
-                        mem_bytes = float(parts[-1])
-                        mem_mb = mem_bytes / (1024 * 1024)
-                        metrics_info.append(f"Memory: {mem_mb:.1f}MB")
-                    break
-        if 'immudb_num_databases' in result['stdout']:
-            # Try to extract database count
-            for line in result['stdout'].split('\n'):
-                if 'immudb_num_databases' in line:
-                    parts = line.split()
-                    if len(parts) > 1 and parts[-1].isdigit():
-                        metrics_info.append(f"Databases: {parts[-1]}")
-                    break
-        
-        output = "Health metrics available"
-        if metrics_info:
-            output += f": {', '.join(metrics_info)}"
-        
-        return [{
-            "name": "immudb_health_metrics",
-            "description": "Test ImmuDB health via metrics endpoint",
-            "passed": True,
-            "output": output,
-            "severity": "LOW"
-        }]
-    
-    return [{
-        "name": "immudb_health_metrics",
-        "description": "Test ImmuDB health via metrics endpoint",
-        "passed": False,
-        "output": "ImmuDB health metrics not accessible on port 9497",
-        "severity": "WARNING"
-    }]
+    # Default to OPA_NS if nothing found
+    return OPA_NS
 
+GATEKEEPER_NS = os.getenv('GATEKEEPER_NS', detect_gatekeeper_namespace())
 
-def test_immudb_pod_status() -> List[Dict]:
-    """Check ImmuDB pod status and readiness"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
-    
-    # Get pod details
-    pod_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o json"
-    result = run_command(pod_cmd)
-    
-    if result['exit_code'] != 0:
-        return [{
-            "name": "immudb_pod_status",
-            "description": "Check ImmuDB pod status and readiness",
-            "passed": False,
-            "output": f"Failed to get ImmuDB pods: {result['stderr']}",
-            "severity": "CRITICAL"
-        }]
-    
-    try:
-        pods_data = json.loads(result['stdout'])
-        pods = pods_data.get('items', [])
-        
-        if not pods:
-            return [{
-                "name": "immudb_pod_status",
-                "description": "Check ImmuDB pod status and readiness",
-                "passed": False,
-                "output": "No ImmuDB pods found",
-                "severity": "CRITICAL"
-            }]
-        
-        pod_info = []
-        unhealthy_pods = []
-        
-        for pod in pods:
-            pod_name = pod['metadata']['name']
-            pod_status = pod['status']['phase']
-            
-            # Get container statuses
-            container_statuses = pod['status'].get('containerStatuses', [])
-            ready_count = sum(1 for c in container_statuses if c.get('ready', False))
-            restart_count = sum(c.get('restartCount', 0) for c in container_statuses)
-            
-            # Check conditions
-            conditions = pod['status'].get('conditions', [])
-            is_ready = any(c['type'] == 'Ready' and c['status'] == 'True' for c in conditions)
-            
-            if pod_status == 'Running' and is_ready:
-                info = f"{pod_name} (Running"
-                if restart_count > 0:
-                    info += f", Restarts: {restart_count}"
-                info += ")"
-                pod_info.append(info)
-            else:
-                unhealthy_pods.append(f"{pod_name} (Status: {pod_status}, Ready: {is_ready}, Restarts: {restart_count})")
-        
-        if unhealthy_pods:
-            return [{
-                "name": "immudb_pod_status",
-                "description": "Check ImmuDB pod status and readiness",
-                "passed": False,
-                "output": f"Unhealthy pods: {', '.join(unhealthy_pods)}",
-                "severity": "CRITICAL"
-            }]
-        
-        output = f"All pods healthy: {', '.join(pod_info)}"
-        return [{
-            "name": "immudb_pod_status",
-            "description": "Check ImmuDB pod status and readiness",
-            "passed": True,
-            "output": output,
-            "severity": "LOW"
-        }]
-        
-    except json.JSONDecodeError:
-        return [{
-            "name": "immudb_pod_status",
-            "description": "Check ImmuDB pod status and readiness",
-            "passed": False,
-            "output": "Failed to parse pod data",
-            "severity": "CRITICAL"
-        }]
+# Policy flags from environment
+POLICIES = {
+    'label_deny': os.getenv('POLICY_LABEL_DENY', 'false').lower() == 'true',
+    'probes': os.getenv('POLICY_PROBES', 'false').lower() == 'true',
+    'resource': os.getenv('POLICY_RESOURCE', 'false').lower() == 'true',
+    'security_context': os.getenv('POLICY_SECURITY_CONTEXT', 'false').lower() == 'true',
+    'pod_level_security': os.getenv('POLICY_POD_LEVEL_SECURITY', 'false').lower() == 'true',
+    'image': os.getenv('POLICY_IMAGE', 'false').lower() == 'true',
+}
 
+# ------------------------------------------------------------
+# Result helper
+# ------------------------------------------------------------
 
-def test_immudb_persistence() -> List[Dict]:
-    """Test if ImmuDB persistence is configured"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
+def create_test_result(name: str, description: str, passed: bool, output: str, severity: str = "INFO") -> Dict[str, Any]:
+    return {
+        "name": name,
+        "description": description,
+        "status": bool(passed),
+        "output": output,
+        "severity": severity.lower(),
+    }
+
+# ------------------------------------------------------------
+# Tests
+# ------------------------------------------------------------
+
+def check_gatekeeper_connectivity() -> List[Dict[str, Any]]:
+    """Check basic Gatekeeper connectivity and health"""
+    tests = []
     
-    # Get ImmuDB pod
-    pod_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_result = run_command(pod_cmd)
+    # First, determine the actual namespace where Gatekeeper is running
+    global GATEKEEPER_NS
     
-    if pod_result['exit_code'] != 0 or not pod_result['stdout']:
-        return [{
-            "name": "immudb_persistence",
-            "description": "Test if ImmuDB persistence is configured",
-            "passed": False,
-            "output": "Could not find ImmuDB pod",
-            "severity": "WARNING"
-        }]
+    # Check if Gatekeeper pods are running in the detected namespace
+    cmd = f"kubectl get pods -n {GATEKEEPER_NS} --no-headers 2>/dev/null | grep -E 'gatekeeper-audit'"
+    r = run_command(cmd, timeout=15)
     
-    pod_name = pod_result['stdout']
+    if ok(r) and 'Running' in r['stdout']:
+        tests.append(create_test_result(
+            "gatekeeper_audit_pod", 
+            "Check Gatekeeper audit pod status",
+            True,
+            f"Gatekeeper audit pod is running in namespace {GATEKEEPER_NS}",
+            "INFO"
+        ))
+    else:
+        # Maybe Gatekeeper is not installed at all
+        tests.append(create_test_result(
+            "gatekeeper_audit_pod",
+            "Check Gatekeeper audit pod status", 
+            False,
+            f"Gatekeeper audit pod not found or not running in {GATEKEEPER_NS}",
+            "CRITICAL"
+        ))
+        return tests  # Early exit if core component not running
     
-    # Check volumes
-    volumes_cmd = f"kubectl get pod -n {namespace} {pod_name} -o json"
-    volumes_result = run_command(volumes_cmd)
+    # Check controller manager pods
+    cmd = f"kubectl get pods -n {GATEKEEPER_NS} --no-headers | grep -E 'gatekeeper-controller' | grep Running | wc -l"
+    r = run_command(cmd, timeout=15)
     
-    if volumes_result['exit_code'] == 0:
+    if ok(r) and r['stdout']:
+        running_count = int(r['stdout'].strip()) if r['stdout'].strip().isdigit() else 0
+        tests.append(create_test_result(
+            "gatekeeper_controller_pods",
+            "Check Gatekeeper controller manager pods",
+            running_count > 0,
+            f"Found {running_count} controller manager pod(s) running",
+            "INFO" if running_count > 0 else "WARNING"
+        ))
+    
+    # Check webhook configuration
+    cmd = "kubectl get validatingwebhookconfigurations gatekeeper-validating-webhook-configuration -o jsonpath='{.webhooks[0].name}' 2>/dev/null"
+    r = run_command(cmd, timeout=10)
+    
+    if ok(r) and 'validation.gatekeeper.sh' in r['stdout']:
+        tests.append(create_test_result(
+            "gatekeeper_webhook",
+            "Check Gatekeeper validating webhook",
+            True,
+            "Validating webhook configured correctly",
+            "INFO"
+        ))
+    else:
+        tests.append(create_test_result(
+            "gatekeeper_webhook",
+            "Check Gatekeeper validating webhook",
+            False,
+            f"Webhook not configured properly",
+            "WARNING"
+        ))
+    
+    # Check webhook failure policy
+    cmd = "kubectl get validatingwebhookconfigurations gatekeeper-validating-webhook-configuration -o jsonpath='{.webhooks[0].failurePolicy}' 2>/dev/null"
+    r = run_command(cmd, timeout=10)
+    
+    if ok(r):
+        failure_policy = r['stdout'].strip() or 'unknown'
+        is_fail_closed = failure_policy.lower() == 'fail'
+        tests.append(create_test_result(
+            "gatekeeper_webhook_failure_policy",
+            "Check webhook failure policy",
+            is_fail_closed,
+            f"Webhook failure policy: {failure_policy} ({'secure' if is_fail_closed else 'may allow violations if webhook fails'})",
+            "INFO" if is_fail_closed else "WARNING"
+        ))
+    
+    # Check if Gatekeeper is excluding the default namespace
+    cmd = "kubectl get validatingwebhookconfigurations gatekeeper-validating-webhook-configuration -o jsonpath='{.webhooks[0].namespaceSelector}' 2>/dev/null"
+    r = run_command(cmd, timeout=10)
+    
+    if ok(r) and r['stdout']:
+        tests.append(create_test_result(
+            "gatekeeper_namespace_selector",
+            "Check webhook namespace selector",
+            True,
+            f"Namespace selector configured: {r['stdout'][:100]}",
+            "INFO"
+        ))
+    
+    return tests
+
+def check_constraint_templates() -> List[Dict[str, Any]]:
+    """Check deployed constraint templates and verify enabled policies are actually deployed"""
+    tests = []
+    
+    # Map template names to policy types
+    template_policy_map = {
+        'k8sallowedimagerequirements': 'image',
+        'podlevelsecuritypolicy': 'pod_level_security',
+        'probespolicy': 'probes',
+        'blocknamespacedeployments': 'label_deny',
+        'resourcepolicy': 'resource',
+        'securitycontextpolicy': 'security_context',
+    }
+    
+    # First check for enabled but not deployed policies
+    enabled_policies = [k for k, v in POLICIES.items() if v]
+    
+    if not enabled_policies:
+        tests.append(create_test_result(
+            "policy_configuration",
+            "Check policy configuration",
+            True,
+            "No policies enabled in environment variables",
+            "INFO"
+        ))
+        return tests
+    
+    tests.append(create_test_result(
+        "policy_configuration",
+        "Check policy configuration",
+        True,
+        f"Enabled policies from ENV: {', '.join(enabled_policies)}",
+        "INFO"
+    ))
+    
+    # Get deployed constraint templates
+    cmd = "kubectl get constrainttemplates.templates.gatekeeper.sh -o json"
+    r = run_command(cmd, timeout=15)
+    
+    deployed_templates = []
+    if ok(r) and r['stdout']:
         try:
-            pod_data = json.loads(volumes_result['stdout'])
-            volumes = pod_data['spec'].get('volumes', [])
-            volume_mounts = []
-            
-            # Look for data volumes
-            for vol in volumes:
-                vol_name = vol.get('name', '')
-                if any(keyword in vol_name.lower() for keyword in ['data', 'storage', 'immudb', 'persistent']):
-                    vol_type = 'PVC' if 'persistentVolumeClaim' in vol else 'EmptyDir' if 'emptyDir' in vol else 'Other'
-                    volume_mounts.append(f"{vol_name}({vol_type})")
-            
-            # Check PVCs
-            pvc_cmd = f"kubectl get pvc -n {namespace} -l app.kubernetes.io/name=immudb -o json"
-            pvc_result = run_command(pvc_cmd)
-            
-            pvc_info = []
-            if pvc_result['exit_code'] == 0:
-                try:
-                    pvc_data = json.loads(pvc_result['stdout'])
-                    pvcs = pvc_data.get('items', [])
-                    for pvc in pvcs:
-                        pvc_name = pvc['metadata']['name']
-                        pvc_status = pvc['status'].get('phase', 'Unknown')
-                        capacity = pvc['status'].get('capacity', {}).get('storage', 'Unknown')
-                        storage_class = pvc['spec'].get('storageClassName', 'default')
-                        pvc_info.append(f"{pvc_name}({capacity}, {storage_class}, {pvc_status})")
-                except:
-                    pass
-            
-            if pvc_info:
-                return [{
-                    "name": "immudb_persistence",
-                    "description": "Test if ImmuDB persistence is configured",
-                    "passed": True,
-                    "output": f"Persistence configured with PVC: {', '.join(pvc_info)}",
-                    "severity": "LOW"
-                }]
-            elif volume_mounts:
-                return [{
-                    "name": "immudb_persistence",
-                    "description": "Test if ImmuDB persistence is configured",
-                    "passed": True,
-                    "output": f"Volumes mounted: {', '.join(volume_mounts)}",
-                    "severity": "LOW"
-                }]
+            templates = json.loads(r['stdout'])
+            deployed_templates = [t['metadata']['name'].lower() for t in templates.get('items', [])]
         except:
             pass
     
-    return [{
-        "name": "immudb_persistence",
-        "description": "Test if ImmuDB persistence is configured",
-        "passed": False,
-        "output": "No persistence volume configured - data will be lost on pod restart",
-        "severity": "WARNING"
-    }]
-
-
-def _get_databases() -> List[Dict]:
-    """Parse IMMUDB_DATABASES environment variable"""
-    databases = []
-    databases_env = os.getenv('IMMUDB_DATABASES', '')
-    
-    if not databases_env:
-        return databases
-    
-    for db_config in databases_env.split(';'):
-        if db_config.strip():
-            parts = db_config.strip().split(':')
-            if len(parts) >= 4:
-                databases.append({
-                    'database': parts[0],
-                    'username': parts[1],
-                    'password': parts[2],
-                    'immudb_name': parts[3]
-                })
-    
-    return databases
-
-
-def test_immudb_databases() -> List[Dict]:
-    """List all databases in ImmuDB"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
-    port = os.getenv('IMMUDB_PORT', '3322')
-    admin_password = os.getenv('IMMUDB_ADMIN_PASSWORD', 'password_default1!A')
-    
-    # Get ImmuDB pod
-    pod_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_result = run_command(pod_cmd)
-    
-    if pod_result['exit_code'] != 0 or not pod_result['stdout']:
-        return [{
-            "name": "immudb_list_databases",
-            "description": "List all databases in ImmuDB",
-            "passed": False,
-            "output": "Could not find ImmuDB pod",
-            "severity": "WARNING"
-        }]
-    
-    pod_name = pod_result['stdout']
-    
-    # List databases
-    list_cmd = f"kubectl exec -n {namespace} {pod_name} -- immuadmin database list --address localhost --port {port} --username immudb --password '{admin_password}' 2>&1"
-    result = run_command(list_cmd)
-    
-    if result['exit_code'] == 0 and result['stdout']:
-        # Parse database list
-        databases = []
-        lines = result['stdout'].split('\n')
-        for line in lines:
-            # Skip headers and empty lines
-            if line and not line.startswith('Database') and not line.startswith('-'):
-                # Extract database name (usually first column)
-                parts = line.split()
-                if parts and parts[0] not in ['immudb', 'systemdb']:  # Skip system databases
-                    databases.append(parts[0])
+    if not deployed_templates:
+        tests.append(create_test_result(
+            "constraint_templates_deployed",
+            "Check deployed constraint templates",
+            False,
+            "No constraint templates found in cluster. Policies enabled but not deployed!",
+            "WARNING"
+        ))
         
-        # Include system databases count
-        total_dbs = len(databases) + 2  # +2 for immudb and systemdb
+        # Check each enabled policy
+        for policy_type in enabled_policies:
+            tests.append(create_test_result(
+                f"{policy_type}_policy_deployment",
+                f"Check {policy_type} policy deployment",
+                False,
+                f"Policy '{policy_type}' is enabled in ENV but no corresponding template deployed",
+                "WARNING"
+            ))
+        return tests
+    
+    tests.append(create_test_result(
+        "constraint_templates_deployed",
+        "List deployed constraint templates",
+        True,
+        f"Found {len(deployed_templates)} deployed template(s)",
+        "INFO"
+    ))
+    
+    # Check each enabled policy to see if it's actually deployed
+    for policy_type in enabled_policies:
+        # Find the template name for this policy type
+        template_name = None
+        for tpl_name, pol_type in template_policy_map.items():
+            if pol_type == policy_type:
+                template_name = tpl_name
+                break
         
-        output = f"Total databases: {total_dbs} (System: 2"
-        if databases:
-            output += f", User: {len(databases)} - {', '.join(databases[:5])}{'...' if len(databases) > 5 else ''})"
+        if template_name and template_name in deployed_templates:
+            # Policy is enabled AND deployed - run tests
+            tests.append(create_test_result(
+                f"{policy_type}_policy_deployment",
+                f"Check {policy_type} policy deployment",
+                True,
+                f"Policy '{policy_type}' is enabled and template '{template_name}' is deployed",
+                "INFO"
+            ))
+            tests.extend(test_policy(template_name, policy_type))
         else:
-            output += ")"
+            # Policy is enabled but NOT deployed
+            tests.append(create_test_result(
+                f"{policy_type}_policy_deployment",
+                f"Check {policy_type} policy deployment",
+                False,
+                f"Policy '{policy_type}' is enabled in ENV but template not found in cluster. Skipping tests.",
+                "WARNING"
+            ))
+    
+    return tests
+
+def test_policy(template_name: str, policy_type: str) -> List[Dict[str, Any]]:
+    """Test a specific policy with positive and negative cases"""
+    tests = []
+    
+    # Get constraints for this template
+    cmd = f"kubectl get {template_name.lower()} -o json 2>/dev/null"
+    r = run_command(cmd, timeout=10)
+    
+    constraints = []
+    if ok(r) and r['stdout']:
+        try:
+            constraint_data = json.loads(r['stdout'])
+            constraints = constraint_data.get('items', [])
+        except:
+            pass
+    
+    if not constraints:
+        tests.append(create_test_result(
+            f"{policy_type}_constraints",
+            f"Check constraints for {template_name}",
+            False,
+            f"No constraints found for template {template_name}",
+            "WARNING"
+        ))
+        return tests
+    
+    # Analyze constraint configuration
+    constraint_configs = []
+    for c in constraints:
+        name = c.get('metadata', {}).get('name', 'unknown')
+        enforcement = c.get('spec', {}).get('enforcementAction', 'deny')
+        match = c.get('spec', {}).get('match', {})
         
-        return [{
-            "name": "immudb_list_databases",
-            "description": "List all databases in ImmuDB",
-            "passed": True,
-            "output": output,
-            "severity": "LOW"
-        }]
+        # Extract matching criteria
+        label_selector = match.get('labelSelector', {}).get('matchLabels', {})
+        namespaces = match.get('namespaces', [])
+        
+        config = {
+            'name': name,
+            'enforcement': enforcement,
+            'labels': label_selector,
+            'namespaces': namespaces if namespaces else ['default']  # Use default if no namespace specified
+        }
+        constraint_configs.append(config)
+        
+        info = f"{name} (enforcement={enforcement}, labels={label_selector}, namespaces={namespaces[:2] if namespaces else 'all'})"
+        
+    tests.append(create_test_result(
+        f"{policy_type}_constraints",
+        f"Check constraints for {template_name}",
+        True,
+        f"Found {len(constraints)} constraint(s): {constraint_configs[0]['name']} and others",
+        "INFO"
+    ))
     
-    if 'unauthorized' in result['stdout'].lower() or 'permission' in result['stdout'].lower():
-        return [{
-            "name": "immudb_list_databases",
-            "description": "List all databases in ImmuDB",
-            "passed": False,
-            "output": "Authentication failed - check admin credentials",
-            "severity": "WARNING"
-        }]
+    # Run tests for each constraint configuration
+    for config in constraint_configs:
+        if policy_type == 'probes':
+            tests.extend(test_probes_policy_with_config(config))
+        elif policy_type == 'resource':
+            tests.extend(test_resource_policy_with_config(config))
+        elif policy_type == 'security_context':
+            tests.extend(test_security_context_policy_with_config(config))
+        elif policy_type == 'pod_level_security':
+            tests.extend(test_pod_level_security_policy_with_config(config))
+        elif policy_type == 'image':
+            tests.extend(test_image_policy_with_config(config))
+        elif policy_type == 'label_deny':
+            tests.extend(test_label_deny_policy_with_config(config))
+        
+        # Only test first constraint to avoid too many tests
+        break
     
-    return [{
-        "name": "immudb_list_databases",
-        "description": "List all databases in ImmuDB",
-        "passed": False,
-        "output": f"Failed to list databases: {result.get('stderr', result.get('stdout', 'Unknown error'))}",
-        "severity": "WARNING"
-    }]
+    return tests
 
-
-def test_databases() -> List[Dict]:
-    """Test all configured databases"""
-    databases = _get_databases()
-    results = []
+def test_probes_policy_with_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Test probes policy enforcement with specific constraint configuration"""
+    tests = []
+    test_name = f"test-probes-{uuid.uuid4().hex[:8]}"
+    test_ns = config['namespaces'][0] if config['namespaces'] else 'default'
+    labels = config['labels']
     
-    if not databases:
-        results.append({
-            "name": "immudb_configured_databases",
-            "description": "Test configured databases",
-            "passed": True,
-            "output": "No databases configured in IMMUDB_DATABASES environment variable",
-            "severity": "LOW"
-        })
+    # Create namespace if needed
+    if test_ns not in ['default', 'kube-system', 'kube-public']:
+        run_command(f"kubectl create namespace {test_ns} --dry-run=client -o yaml | kubectl apply -f -", timeout=5)
+    
+    # Build label string for YAML
+    label_lines = []
+    for key, value in labels.items():
+        label_lines.append(f"    {key}: {value}")
+    labels_yaml = '\n'.join(label_lines) if label_lines else "    test: pod"
+    
+    # Positive test - Pod WITH required labels AND fully compliant with ALL policies
+    positive_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-valid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  containers:
+  - name: test-container
+    image: bitnami/postgresql:15.2.0
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+        ephemeral-storage: "1Gi"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(positive_yaml)
+        positive_file = f.name
+    
+    cmd = f"kubectl apply -f {positive_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if ok(r):
+        tests.append(create_test_result(
+            f"probes_positive_{config['name'][:20]}",
+            f"Probes policy - positive test (fully compliant, labels: {labels})",
+            True,
+            f"Fully compliant pod created successfully in {test_ns}",
+            "INFO"
+        ))
+        # Cleanup
+        run_command(f"kubectl delete pod {test_name}-valid -n {test_ns} --ignore-not-found=true", timeout=10)
+    else:
+        error_msg = r.get('combined', '') or f"Exit code: {r.get('exit_code', 'unknown')}"
+        tests.append(create_test_result(
+            f"probes_positive_{config['name'][:20]}",
+            f"Probes policy - positive test (fully compliant, labels: {labels})",
+            False,
+            f"Failed to create fully compliant pod: {error_msg[:200]}",
+            "WARNING"
+        ))
+    
+    os.unlink(positive_file)
+    
+    # Negative test - Pod WITH required labels but WITHOUT probes (should fail)
+    negative_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-invalid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  containers:
+  - name: test-container
+    image: bitnami/postgresql:15.2.0
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+        ephemeral-storage: "1Gi"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(negative_yaml)
+        negative_file = f.name
+    
+    cmd = f"kubectl apply -f {negative_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if not ok(r) and ('denied the request' in r.get('combined', '')):
+        tests.append(create_test_result(
+            f"probes_negative_{config['name'][:20]}",
+            f"Probes policy - negative test (no probes, labels: {labels})",
+            True,
+            f"Pod without probes correctly rejected in {test_ns}",
+            "INFO"
+        ))
+    else:
+        if ok(r):
+            tests.append(create_test_result(
+                f"probes_negative_{config['name'][:20]}",
+                f"Probes policy - negative test (no probes, labels: {labels})",
+                False,
+                f"Pod without probes was created when it should have been rejected (constraint: {config['name']})",
+                "WARNING"
+            ))
+            # Cleanup
+            run_command(f"kubectl delete pod {test_name}-invalid -n {test_ns} --ignore-not-found=true", timeout=10)
+        else:
+            error_msg = r.get('combined', '') or f"Exit code: {r.get('exit_code', 'unknown')}"
+            tests.append(create_test_result(
+                f"probes_negative_{config['name'][:20]}",
+                f"Probes policy - negative test (no probes, labels: {labels})",
+                False,
+                f"Pod creation failed but not due to probes policy: {error_msg[:200]}",
+                "WARNING"
+            ))
+    
+    os.unlink(negative_file)
+    
+    return tests
+
+def test_resource_policy_with_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Test resource policy enforcement with specific constraint configuration"""
+    tests = []
+    test_name = f"test-resources-{uuid.uuid4().hex[:8]}"
+    test_ns = config['namespaces'][0] if config['namespaces'] else 'default'
+    labels = config['labels']
+    
+    # Create namespace if needed
+    if test_ns not in ['default', 'kube-system', 'kube-public']:
+        run_command(f"kubectl create namespace {test_ns} --dry-run=client -o yaml | kubectl apply -f -", timeout=5)
+    
+    # Build label string for YAML
+    label_lines = []
+    for key, value in labels.items():
+        label_lines.append(f"    {key}: {value}")
+    labels_yaml = '\n'.join(label_lines) if label_lines else "    test: pod"
+    
+    # Positive test - Fully compliant pod with all requirements
+    positive_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-valid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  containers:
+  - name: test-container
+    image: bitnami/postgresql:15.2.0
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+        ephemeral-storage: "1Gi"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(positive_yaml)
+        positive_file = f.name
+    
+    cmd = f"kubectl apply -f {positive_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if ok(r):
+        tests.append(create_test_result(
+            f"resource_positive_{config['name'][:20]}",
+            f"Resource policy - positive test (fully compliant, labels: {labels})",
+            True,
+            f"Fully compliant pod created successfully in {test_ns}",
+            "INFO"
+        ))
+        run_command(f"kubectl delete pod {test_name}-valid -n {test_ns} --ignore-not-found=true", timeout=10)
+    else:
+        error_msg = r.get('combined', '') or f"Exit code: {r.get('exit_code', 'unknown')}"
+        tests.append(create_test_result(
+            f"resource_positive_{config['name'][:20]}",
+            f"Resource policy - positive test (fully compliant, labels: {labels})",
+            False,
+            f"Failed: {error_msg[:200]}",
+            "WARNING"
+        ))
+    
+    os.unlink(positive_file)
+    
+    # Negative test - WITH labels but WITHOUT resources (missing only resources to isolate test)
+    negative_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-invalid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  containers:
+  - name: test-container
+    image: bitnami/postgresql:15.2.0
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(negative_yaml)
+        negative_file = f.name
+    
+    cmd = f"kubectl apply -f {negative_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if not ok(r) and ('denied the request' in r.get('combined', '')):
+        tests.append(create_test_result(
+            f"resource_negative_{config['name'][:20]}",
+            f"Resource policy - negative test (no resources, labels: {labels})",
+            True,
+            f"Pod without resources correctly rejected",
+            "INFO"
+        ))
+    else:
+        if ok(r):
+            tests.append(create_test_result(
+                f"resource_negative_{config['name'][:20]}",
+                f"Resource policy - negative test (no resources, labels: {labels})",
+                False,
+                f"Pod without resources was created when it should have been rejected",
+                "WARNING"
+            ))
+            run_command(f"kubectl delete pod {test_name}-invalid -n {test_ns} --ignore-not-found=true", timeout=10)
+        else:
+            error_msg = r.get('combined', '') or f"Exit code: {r.get('exit_code', 'unknown')}"
+            tests.append(create_test_result(
+                f"resource_negative_{config['name'][:20]}",
+                f"Resource policy - negative test",
+                False,
+                f"Failed but not due to resource policy: {error_msg[:200]}",
+                "WARNING"
+            ))
+    
+    os.unlink(negative_file)
+    
+    return tests
+
+def test_security_context_policy_with_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Test security context policy with specific constraint configuration"""
+    tests = []
+    test_name = f"test-secctx-{uuid.uuid4().hex[:8]}"
+    test_ns = config['namespaces'][0] if config['namespaces'] else 'default'
+    labels = config['labels']
+    
+    # Create namespace if needed
+    if test_ns not in ['default', 'kube-system', 'kube-public']:
+        run_command(f"kubectl create namespace {test_ns} --dry-run=client -o yaml | kubectl apply -f -", timeout=5)
+    
+    # Build label string
+    label_lines = []
+    for key, value in labels.items():
+        label_lines.append(f"    {key}: {value}")
+    labels_yaml = '\n'.join(label_lines) if label_lines else "    test: pod"
+    
+    # Positive test - Fully compliant pod
+    positive_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-valid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  containers:
+  - name: test-container
+    image: bitnami/postgresql:15.2.0
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+        ephemeral-storage: "1Gi"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(positive_yaml)
+        positive_file = f.name
+    
+    cmd = f"kubectl apply -f {positive_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if ok(r):
+        tests.append(create_test_result(
+            f"security_context_positive_{config['name'][:20]}",
+            f"Security context - positive test (fully compliant, labels: {labels})",
+            True,
+            f"Fully compliant pod created successfully",
+            "INFO"
+        ))
+        run_command(f"kubectl delete pod {test_name}-valid -n {test_ns} --ignore-not-found=true", timeout=10)
+    else:
+        error_msg = r.get('combined', '') or f"Exit code: {r.get('exit_code', 'unknown')}"
+        tests.append(create_test_result(
+            f"security_context_positive_{config['name'][:20]}",
+            f"Security context - positive test",
+            False,
+            f"Failed: {error_msg[:200]}",
+            "WARNING"
+        ))
+    
+    os.unlink(positive_file)
+    
+    # Negative test - Missing only security context to isolate test
+    negative_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-invalid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  containers:
+  - name: test-container
+    image: bitnami/postgresql:15.2.0
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+        ephemeral-storage: "1Gi"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(negative_yaml)
+        negative_file = f.name
+    
+    cmd = f"kubectl apply -f {negative_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if not ok(r) and ('denied the request' in r.get('combined', '')):
+        tests.append(create_test_result(
+            f"security_context_negative_{config['name'][:20]}",
+            f"Security context - negative test (no security context)",
+            True,
+            f"Pod without security context correctly rejected",
+            "INFO"
+        ))
+    else:
+        if ok(r):
+            tests.append(create_test_result(
+                f"security_context_negative_{config['name'][:20]}",
+                f"Security context - negative test",
+                False,
+                f"Pod without security context was created when it should have been rejected",
+                "WARNING"
+            ))
+            run_command(f"kubectl delete pod {test_name}-invalid -n {test_ns} --ignore-not-found=true", timeout=10)
+        else:
+            tests.append(create_test_result(
+                f"security_context_negative_{config['name'][:20]}",
+                f"Security context - negative test",
+                False,
+                f"Failed but not due to security context policy: {r.get('combined', '')[:200]}",
+                "WARNING"
+            ))
+    
+    os.unlink(negative_file)
+    
+    return tests
+
+def test_pod_level_security_policy_with_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Test pod level security policy with specific constraint configuration"""
+    tests = []
+    test_name = f"test-podsec-{uuid.uuid4().hex[:8]}"
+    test_ns = config['namespaces'][0] if config['namespaces'] else 'default'
+    labels = config['labels']
+    
+    # Create namespace if needed
+    if test_ns not in ['default', 'kube-system', 'kube-public']:
+        run_command(f"kubectl create namespace {test_ns} --dry-run=client -o yaml | kubectl apply -f -", timeout=5)
+    
+    # Build label string
+    label_lines = []
+    for key, value in labels.items():
+        label_lines.append(f"    {key}: {value}")
+    labels_yaml = '\n'.join(label_lines) if label_lines else "    test: pod"
+    
+    # Positive test - Fully compliant pod
+    positive_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-valid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  containers:
+  - name: test-container
+    image: bitnami/postgresql:15.2.0
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+        ephemeral-storage: "1Gi"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(positive_yaml)
+        positive_file = f.name
+    
+    cmd = f"kubectl apply -f {positive_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if ok(r):
+        tests.append(create_test_result(
+            f"pod_security_positive_{config['name'][:20]}",
+            f"Pod security - positive test (fully compliant, labels: {labels})",
+            True,
+            f"Fully compliant pod created successfully",
+            "INFO"
+        ))
+        run_command(f"kubectl delete pod {test_name}-valid -n {test_ns} --ignore-not-found=true", timeout=10)
+    else:
+        error_msg = r.get('combined', '') or f"Exit code: {r.get('exit_code', 'unknown')}"
+        tests.append(create_test_result(
+            f"pod_security_positive_{config['name'][:20]}",
+            f"Pod security - positive test",
+            False,
+            f"Failed: {error_msg[:200]}",
+            "WARNING"
+        ))
+    
+    os.unlink(positive_file)
+    
+    # Negative test - Violates ONLY pod-level security (hostNetwork=true)
+    negative_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-invalid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  hostNetwork: true
+  containers:
+  - name: test-container
+    image: bitnami/postgresql:15.2.0
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+        ephemeral-storage: "1Gi"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(negative_yaml)
+        negative_file = f.name
+    
+    cmd = f"kubectl apply -f {negative_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if not ok(r) and ('denied the request' in r.get('combined', '')):
+        tests.append(create_test_result(
+            f"pod_security_negative_{config['name'][:20]}",
+            f"Pod security - negative test (hostNetwork=true)",
+            True,
+            f"Pod with hostNetwork correctly rejected",
+            "INFO"
+        ))
+    else:
+        if ok(r):
+            tests.append(create_test_result(
+                f"pod_security_negative_{config['name'][:20]}",
+                f"Pod security - negative test (hostNetwork)",
+                False,
+                f"Pod with hostNetwork was created when it should have been rejected",
+                "WARNING"
+            ))
+            run_command(f"kubectl delete pod {test_name}-invalid -n {test_ns} --ignore-not-found=true", timeout=10)
+        else:
+            tests.append(create_test_result(
+                f"pod_security_negative_{config['name'][:20]}",
+                f"Pod security - negative test",
+                False,
+                f"Failed but not due to pod security policy: {r.get('combined', '')[:200]}",
+                "WARNING"
+            ))
+    
+    os.unlink(negative_file)
+    
+    return tests
+
+def test_image_policy_with_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Test image policy with specific constraint configuration"""
+    tests = []
+    test_name = f"test-image-{uuid.uuid4().hex[:8]}"
+    test_ns = config['namespaces'][0] if config['namespaces'] else 'default'
+    labels = config['labels']
+    
+    # Create namespace if needed
+    if test_ns not in ['default', 'kube-system', 'kube-public']:
+        run_command(f"kubectl create namespace {test_ns} --dry-run=client -o yaml | kubectl apply -f -", timeout=5)
+    
+    # Build label string
+    label_lines = []
+    for key, value in labels.items():
+        label_lines.append(f"    {key}: {value}")
+    labels_yaml = '\n'.join(label_lines) if label_lines else "    test: pod"
+    
+    # Positive test - allowed image
+    positive_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-valid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  containers:
+  - name: test-container
+    image: bitnami/postgresql:15.2.0
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(positive_yaml)
+        positive_file = f.name
+    
+    cmd = f"kubectl apply -f {positive_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if ok(r):
+        tests.append(create_test_result(
+            f"image_positive_{config['name'][:20]}",
+            f"Image policy - positive test (allowed registry)",
+            True,
+            f"Pod with allowed image created successfully",
+            "INFO"
+        ))
+        run_command(f"kubectl delete pod {test_name}-valid -n {test_ns} --ignore-not-found=true", timeout=10)
+    else:
+        tests.append(create_test_result(
+            f"image_positive_{config['name'][:20]}",
+            f"Image policy - positive test",
+            False,
+            f"Failed: {r.get('combined', '')[:200]}",
+            "WARNING"
+        ))
+    
+    os.unlink(positive_file)
+    
+    # Negative test - disallowed image
+    negative_yaml = f"""
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {test_name}-invalid
+  namespace: {test_ns}
+  labels:
+{labels_yaml}
+spec:
+  containers:
+  - name: test-container
+    image: nginx:latest
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(negative_yaml)
+        negative_file = f.name
+    
+    cmd = f"kubectl apply -f {negative_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if not ok(r) and ('denied the request' in r.get('combined', '')):
+        tests.append(create_test_result(
+            f"image_negative_{config['name'][:20]}",
+            f"Image policy - negative test (latest tag)",
+            True,
+            f"Pod with 'latest' tag correctly rejected",
+            "INFO"
+        ))
+    else:
+        if ok(r):
+            tests.append(create_test_result(
+                f"image_negative_{config['name'][:20]}",
+                f"Image policy - negative test",
+                False,
+                f"Pod with 'latest' tag was created when it should have been rejected",
+                "WARNING"
+            ))
+            run_command(f"kubectl delete pod {test_name}-invalid -n {test_ns} --ignore-not-found=true", timeout=10)
+        else:
+            tests.append(create_test_result(
+                f"image_negative_{config['name'][:20]}",
+                f"Image policy - negative test",
+                False,
+                f"Failed but not due to policy: {r.get('combined', '')[:200]}",
+                "WARNING"
+            ))
+    
+    os.unlink(negative_file)
+    
+    return tests
+
+def test_label_deny_policy_with_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Test label deny policy with specific constraint configuration"""
+    tests = []
+    test_name = f"test-label-{uuid.uuid4().hex[:8]}"
+    test_ns = config['namespaces'][0] if config['namespaces'] else 'production'
+    
+    # Create namespace if needed
+    if test_ns not in ['default', 'kube-system', 'kube-public']:
+        run_command(f"kubectl create namespace {test_ns} --dry-run=client -o yaml | kubectl apply -f -", timeout=5)
+    
+    # For label deny, the labels are REQUIRED, not selectors
+    # This policy typically requires specific labels to be present
+    
+    # Positive test - WITH required labels
+    positive_yaml = f"""
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {test_name}-valid
+  namespace: {test_ns}
+  labels:
+    production: env
+    label: app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test
+  template:
+    metadata:
+      labels:
+        app: test
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.21
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(positive_yaml)
+        positive_file = f.name
+    
+    cmd = f"kubectl apply -f {positive_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if ok(r):
+        tests.append(create_test_result(
+            f"label_deny_positive_{config['name'][:20]}",
+            f"Label deny - positive test (with required labels)",
+            True,
+            f"Deployment with required labels created in {test_ns}",
+            "INFO"
+        ))
+        run_command(f"kubectl delete deployment {test_name}-valid -n {test_ns} --ignore-not-found=true", timeout=10)
+    else:
+        tests.append(create_test_result(
+            f"label_deny_positive_{config['name'][:20]}",
+            f"Label deny - positive test",
+            False,
+            f"Failed: {r.get('combined', '')[:200]}",
+            "WARNING"
+        ))
+    
+    os.unlink(positive_file)
+    
+    # Negative test - WITHOUT required labels
+    negative_yaml = f"""
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {test_name}-invalid
+  namespace: {test_ns}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test
+  template:
+    metadata:
+      labels:
+        app: test
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.21
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        f.write(negative_yaml)
+        negative_file = f.name
+    
+    cmd = f"kubectl apply -f {negative_file} 2>&1"
+    r = run_command(cmd, timeout=10)
+    
+    if not ok(r) and ('denied the request' in r.get('combined', '')):
+        tests.append(create_test_result(
+            f"label_deny_negative_{config['name'][:20]}",
+            f"Label deny - negative test (without labels)",
+            True,
+            f"Deployment without labels correctly rejected in {test_ns}",
+            "INFO"
+        ))
+    else:
+        if ok(r):
+            tests.append(create_test_result(
+                f"label_deny_negative_{config['name'][:20]}",
+                f"Label deny - negative test",
+                False,
+                f"Deployment without labels was created when it should have been rejected",
+                "WARNING"
+            ))
+            run_command(f"kubectl delete deployment {test_name}-invalid -n {test_ns} --ignore-not-found=true", timeout=10)
+        else:
+            tests.append(create_test_result(
+                f"label_deny_negative_{config['name'][:20]}",
+                f"Label deny - negative test",
+                False,
+                f"Failed but not due to policy: {r.get('combined', '')[:200]}",
+                "WARNING"
+            ))
+    
+    os.unlink(negative_file)
+    
+    return tests
+
+def check_gatekeeper_logs(time_window_minutes: int = 5) -> List[Dict[str, Any]]:
+    """Check Gatekeeper pod logs for errors and violations"""
+    tests = []
+    
+    # Check audit logs for violations
+    cmd = f"kubectl logs -n {GATEKEEPER_NS} -l gatekeeper.sh/operation=audit --since={time_window_minutes}m --tail=100 2>&1"
+    r = run_command(cmd, timeout=20)
+    
+    if ok(r) and r['stdout']:
+        violation_count = r['stdout'].count('violations')
+        error_count = r['stdout'].count('error')
+        
+        if error_count > 10:  # Threshold for concerning number of errors
+            tests.append(create_test_result(
+                "gatekeeper_audit_logs",
+                f"Check Gatekeeper audit logs (last {time_window_minutes}m)",
+                False,
+                f"Found {error_count} errors in audit logs",
+                "WARNING"
+            ))
+        else:
+            tests.append(create_test_result(
+                "gatekeeper_audit_logs",
+                f"Check Gatekeeper audit logs (last {time_window_minutes}m)",
+                True,
+                f"Audit running normally, {violation_count} violation entries logged",
+                "INFO"
+            ))
+    
+    # Check controller logs
+    cmd = f"kubectl logs -n {GATEKEEPER_NS} -l control-plane=controller-manager --since={time_window_minutes}m --tail=100 2>&1 | head -200"
+    r = run_command(cmd, timeout=20)
+    
+    if ok(r) and r['stdout']:
+        if 'panic' in r['stdout'].lower() or 'fatal' in r['stdout'].lower():
+            tests.append(create_test_result(
+                "gatekeeper_controller_logs",
+                f"Check Gatekeeper controller logs (last {time_window_minutes}m)",
+                False,
+                "Found panic or fatal errors in controller logs",
+                "CRITICAL"
+            ))
+        else:
+            tests.append(create_test_result(
+                "gatekeeper_controller_logs",
+                f"Check Gatekeeper controller logs (last {time_window_minutes}m)",
+                True,
+                "Controller logs healthy",
+                "INFO"
+            ))
+    
+    return tests
+
+def check_constraint_violations() -> List[Dict[str, Any]]:
+    """Check for any existing constraint violations"""
+    tests = []
+    
+    # Get all constraint types
+    cmd = "kubectl get constraints -A -o json 2>/dev/null"
+    r = run_command(cmd, timeout=15)
+    
+    total_violations = 0
+    violation_details = []
+    
+    if ok(r) and r['stdout']:
+        try:
+            data = json.loads(r['stdout'])
+            for item in data.get('items', []):
+                violations = item.get('status', {}).get('totalViolations', 0)
+                if violations > 0:
+                    total_violations += violations
+                    name = item.get('metadata', {}).get('name', 'unknown')
+                    kind = item.get('kind', 'unknown')
+                    violation_details.append(f"{kind}/{name}: {violations}")
+        except:
+            pass
+    
+    if total_violations > 0:
+        tests.append(create_test_result(
+            "constraint_violations",
+            "Check for existing constraint violations",
+            False,
+            f"Found {total_violations} total violation(s): {', '.join(violation_details[:3])}{'...' if len(violation_details) > 3 else ''}",
+            "WARNING"
+        ))
+    else:
+        tests.append(create_test_result(
+            "constraint_violations",
+            "Check for existing constraint violations",
+            True,
+            "No constraint violations found",
+            "INFO"
+        ))
+    
+    return tests
+
+# ------------------------------------------------------------
+# Runner
+# ------------------------------------------------------------
+
+def test_opa_gatekeeper() -> List[Dict[str, Any]]:
+    """Main test runner for OPA Gatekeeper policies"""
+    results: List[Dict[str, Any]] = []
+    
+    # 1) Gatekeeper connectivity (gate)
+    gatekeeper_tests = check_gatekeeper_connectivity()
+    results.extend(gatekeeper_tests)
+    
+    if not gatekeeper_tests[0]['status']:
+        # Early exit if Gatekeeper not running
         return results
     
-    for database in databases:
-        results.append(immudb_database_exists(database))
-        results.append(immudb_user_access(database))
-        results.append(immudb_write_test(database))
+    # 2) Check constraint templates and run policy tests
+    results.extend(check_constraint_templates())
+    
+    # 3) Check for existing violations
+    results.extend(check_constraint_violations())
+    
+    # 4) Check Gatekeeper logs
+    results.extend(check_gatekeeper_logs(time_window_minutes=5))
     
     return results
 
-
-def immudb_database_exists(database: Dict) -> Dict:
-    """Test if database exists in ImmuDB"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
-    port = os.getenv('IMMUDB_PORT', '3322')
-    admin_password = os.getenv('IMMUDB_ADMIN_PASSWORD', 'password_default1!A')
-    db_name = database['immudb_name']
-    
-    # Get ImmuDB pod
-    pod_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_result = run_command(pod_cmd)
-    
-    if pod_result['exit_code'] != 0 or not pod_result['stdout']:
-        return {
-            "name": f"immudb_{database['database']}_exists",
-            "description": f"Check if database {db_name} exists",
-            "passed": False,
-            "output": "Could not find ImmuDB pod",
-            "severity": "WARNING"
-        }
-    
-    pod_name = pod_result['stdout']
-    
-    # Check if database exists
-    list_cmd = f"kubectl exec -n {namespace} {pod_name} -- immuadmin database list --address localhost --port {port} --username immudb --password '{admin_password}' 2>&1 | grep -w {db_name}"
-    result = run_command(list_cmd)
-    
-    if result['exit_code'] == 0 and db_name in result['stdout']:
-        return {
-            "name": f"immudb_{database['database']}_exists",
-            "description": f"Check if database {db_name} exists",
-            "passed": True,
-            "output": f"Database '{db_name}' exists in ImmuDB",
-            "severity": "LOW"
-        }
-    
-    return {
-        "name": f"immudb_{database['database']}_exists",
-        "description": f"Check if database {db_name} exists",
-        "passed": False,
-        "output": f"Database '{db_name}' not found in ImmuDB",
-        "severity": "WARNING"
-    }
-
-
-def immudb_user_access(database: Dict) -> Dict:
-    """Test user access to database"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
-    port = os.getenv('IMMUDB_PORT', '3322')
-    username = database['username']
-    password = database['password']
-    db_name = database['immudb_name']
-    
-    # Get ImmuDB pod
-    pod_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_result = run_command(pod_cmd)
-    
-    if pod_result['exit_code'] != 0 or not pod_result['stdout']:
-        return {
-            "name": f"immudb_{database['database']}_user_access",
-            "description": f"Test user {username} access to database {db_name}",
-            "passed": False,
-            "output": "Could not find ImmuDB pod",
-            "severity": "WARNING"
-        }
-    
-    pod_name = pod_result['stdout']
-    
-    # Try to connect as user
-    stats_cmd = f"kubectl exec -n {namespace} {pod_name} -- immuadmin stats --address localhost --port {port} --database {db_name} --username {username} --password '{password}' 2>&1"
-    result = run_command(stats_cmd, timeout=5)
-    
-    if result['exit_code'] == 0 or 'database' in result['stdout'].lower():
-        # Parse stats if available
-        stats_info = ""
-        if 'entries' in result['stdout'].lower():
-            for line in result['stdout'].split('\n'):
-                if 'entries' in line.lower():
-                    stats_info = f" | {line.strip()}"
-                    break
-        
-        return {
-            "name": f"immudb_{database['database']}_user_access",
-            "description": f"Test user {username} access to database {db_name}",
-            "passed": True,
-            "output": f"User '{username}' can access database '{db_name}'{stats_info}",
-            "severity": "LOW"
-        }
-    
-    if 'unauthorized' in result['stdout'].lower() or 'invalid' in result['stdout'].lower():
-        return {
-            "name": f"immudb_{database['database']}_user_access",
-            "description": f"Test user {username} access to database {db_name}",
-            "passed": False,
-            "output": f"Authentication failed for user '{username}' on database '{db_name}'",
-            "severity": "WARNING"
-        }
-    
-    return {
-        "name": f"immudb_{database['database']}_user_access",
-        "description": f"Test user {username} access to database {db_name}",
-        "passed": False,
-        "output": f"User '{username}' cannot access database '{db_name}'",
-        "severity": "WARNING"
-    }
-
-
-def immudb_write_test(database: Dict) -> Dict:
-    """Test write operation to database"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
-    username = database['username']
-    password = database['password']
-    db_name = database['immudb_name']
-    
-    # Get ImmuDB pod
-    pod_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_result = run_command(pod_cmd)
-    
-    if pod_result['exit_code'] != 0 or not pod_result['stdout']:
-        return {
-            "name": f"immudb_{database['database']}_write_test",
-            "description": f"Test write operation to database {db_name}",
-            "passed": False,
-            "output": "Could not find ImmuDB pod",
-            "severity": "WARNING"
-        }
-    
-    pod_name = pod_result['stdout']
-    
-    # Test via REST API login
-    login_cmd = f"""kubectl exec -n {namespace} {pod_name} -- curl -s -X POST http://localhost:3323/api/v1/immurestproxy/login -H "Content-Type: application/json" -d '{{"user": "{username}", "password": "{password}", "database": "{db_name}"}}' 2>&1"""
-    result = run_command(login_cmd, timeout=5)
-    
-    if result['exit_code'] == 0 and ('token' in result['stdout'].lower() or 'success' in result['stdout'].lower() or '{' in result['stdout']):
-        return {
-            "name": f"immudb_{database['database']}_write_test",
-            "description": f"Test write operation to database {db_name}",
-            "passed": True,
-            "output": f"Write access verified for database '{db_name}' (user: {username})",
-            "severity": "LOW"
-        }
-    
-    # Fallback: verify database exists and is operational
-    port = os.getenv('IMMUDB_PORT', '3322')
-    admin_password = os.getenv('IMMUDB_ADMIN_PASSWORD', 'password_default1!A')
-    
-    verify_cmd = f"kubectl exec -n {namespace} {pod_name} -- immuadmin database list --address localhost --port {port} --username immudb --password '{admin_password}' 2>&1 | grep -w {db_name}"
-    verify_result = run_command(verify_cmd, timeout=5)
-    
-    if verify_result['exit_code'] == 0 and db_name in verify_result['stdout']:
-        return {
-            "name": f"immudb_{database['database']}_write_test",
-            "description": f"Test write operation to database {db_name}",
-            "passed": True,
-            "output": f"Database '{db_name}' is operational (REST API test unavailable)",
-            "severity": "LOW"
-        }
-    
-    return {
-        "name": f"immudb_{database['database']}_write_test",
-        "description": f"Test write operation to database {db_name}",
-        "passed": False,
-        "output": f"Cannot verify write access to database '{db_name}'",
-        "severity": "WARNING"
-    }
-
-
-def test_immudb_logs() -> List[Dict]:
-    """Check ImmuDB pod logs for errors"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
-    time_window = os.getenv('IMMUDB_LOG_TIME_WINDOW', '5m')
-    
-    # Get ImmuDB pods
-    pods_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o jsonpath='{{.items[*].metadata.name}}'"
-    pods_result = run_command(pods_cmd)
-    
-    if pods_result['exit_code'] != 0:
-        return [{
-            "name": "immudb_logs_check",
-            "description": "Check ImmuDB logs for errors",
-            "passed": False,
-            "output": f"Failed to get ImmuDB pods: {pods_result['stderr']}",
-            "severity": "WARNING"
-        }]
-    
-    pod_names = pods_result['stdout'].split()
-    results = []
-    
-    for pod_name in pod_names:
-        if not pod_name:
-            continue
-        
-        # Get recent logs
-        log_cmd = f"kubectl logs -n {namespace} {pod_name} --since={time_window} 2>&1 | tail -100"
-        log_result = run_command(log_cmd, timeout=15)
-        
-        error_count = 0
-        warning_count = 0
-        sample_errors = []
-        
-        if log_result['stdout']:
-            error_patterns = [
-                r'ERROR',
-                r'FATAL',
-                r'panic:',
-                r'failed to',
-                r'error:',
-                r'cannot connect',
-                r'permission denied',
-                r'unauthorized'
-            ]
-            
-            lines = log_result['stdout'].split('\n')
-            for line in lines:
-                # Check for errors
-                for pattern in error_patterns:
-                    if re.search(pattern, line, re.IGNORECASE):
-                        # Skip false positives
-                        if not any(skip in line.lower() for skip in ['info', 'listening', 'started', 'ready', 'serving']):
-                            error_count += 1
-                            if len(sample_errors) < 2 and len(line) < 150:
-                                sample_errors.append(line.strip()[:100])
-                            break
-                
-                # Count warnings
-                if re.search(r'WARN|WARNING', line, re.IGNORECASE):
-                    warning_count += 1
-        
-        if error_count > 0:
-            output = f"Found {error_count} errors in last {time_window}"
-            if sample_errors:
-                output += f" | Sample: '{sample_errors[0]}'"
-            passed = False
-            severity = "WARNING" if error_count < 10 else "CRITICAL"
-        else:
-            output = f"No errors in last {time_window}"
-            if warning_count > 0:
-                output += f" ({warning_count} warnings)"
-            passed = True
-            severity = "LOW"
-        
-        results.append({
-            "name": f"immudb_logs_{pod_name}",
-            "description": "Check ImmuDB logs for errors",
-            "passed": passed,
-            "output": output,
-            "severity": severity
-        })
-    
-    return results
-
-
-def test_immudb_service() -> List[Dict]:
-    """Check ImmuDB service configuration"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
-    
-    # Get service details
-    svc_cmd = f"kubectl get service -n {namespace} -l app.kubernetes.io/name=immudb -o json"
-    result = run_command(svc_cmd)
-    
-    if result['exit_code'] != 0:
-        return [{
-            "name": "immudb_service",
-            "description": "Check ImmuDB service configuration",
-            "passed": False,
-            "output": f"No ImmuDB service found: {result['stderr']}",
-            "severity": "WARNING"
-        }]
-    
+def main():
+    """Main entry point"""
     try:
-        svc_data = json.loads(result['stdout'])
-        services = svc_data.get('items', [])
-        
-        if not services:
-            return [{
-                "name": "immudb_service",
-                "description": "Check ImmuDB service configuration",
-                "passed": False,
-                "output": "No ImmuDB services found",
-                "severity": "WARNING"
-            }]
-        
-        service_info = []
-        
-        for svc in services:
-            svc_name = svc['metadata']['name']
-            svc_type = svc['spec'].get('type', 'Unknown')
-            cluster_ip = svc['spec'].get('clusterIP', 'None')
-            ports = svc['spec'].get('ports', [])
-            
-            port_info = []
-            for port in ports:
-                port_name = port.get('name', 'unnamed')
-                port_num = port.get('port')
-                target_port = port.get('targetPort')
-                port_info.append(f"{port_name}:{port_num}→{target_port}")
-            
-            # Check endpoints
-            ep_cmd = f"kubectl get endpoints {svc_name} -n {namespace} -o jsonpath='{{.subsets[*].addresses}}' 2>/dev/null | wc -w"
-            ep_result = run_command(ep_cmd)
-            endpoint_count = int(ep_result['stdout']) if ep_result['stdout'].isdigit() else 0
-            
-            svc_details = f"{svc_name} ({svc_type}, IP: {cluster_ip}, Ports: {', '.join(port_info)}, Endpoints: {endpoint_count})"
-            service_info.append(svc_details)
-        
-        return [{
-            "name": "immudb_service",
-            "description": "Check ImmuDB service configuration",
-            "passed": True,
-            "output": f"Services configured: {' | '.join(service_info)}",
-            "severity": "LOW"
-        }]
-        
-    except json.JSONDecodeError:
-        return [{
-            "name": "immudb_service",
-            "description": "Check ImmuDB service configuration",
-            "passed": False,
-            "output": "Failed to parse service data",
-            "severity": "WARNING"
-        }]
-
-
-def test_immudb_resources() -> List[Dict]:
-    """Check ImmuDB resource usage and limits"""
-    namespace = os.getenv('IMMUDB_NAMESPACE', 'immudb')
-    
-    # Get ImmuDB pod
-    pod_cmd = f"kubectl get pods -n {namespace} -l app.kubernetes.io/name=immudb -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_result = run_command(pod_cmd)
-    
-    if pod_result['exit_code'] != 0 or not pod_result['stdout']:
-        return [{
-            "name": "immudb_resource_usage",
-            "description": "Check ImmuDB resource usage and limits",
-            "passed": False,
-            "output": "Could not find ImmuDB pod",
-            "severity": "WARNING"
-        }]
-    
-    pod_name = pod_result['stdout']
-    
-    # Get resource configuration
-    resources_cmd = f"kubectl get pod {pod_name} -n {namespace} -o json"
-    result = run_command(resources_cmd)
-    
-    if result['exit_code'] != 0:
-        return [{
-            "name": "immudb_resource_usage",
-            "description": "Check ImmuDB resource usage and limits",
-            "passed": False,
-            "output": f"Failed to get pod resources: {result['stderr']}",
-            "severity": "WARNING"
-        }]
-    
-    try:
-        pod_data = json.loads(result['stdout'])
-        containers = pod_data['spec']['containers']
-        
-        resource_info = []
-        for container in containers:
-            if 'immudb' in container['name'].lower():
-                resources = container.get('resources', {})
-                limits = resources.get('limits', {})
-                requests = resources.get('requests', {})
-                
-                if requests:
-                    req_cpu = requests.get('cpu', 'none')
-                    req_mem = requests.get('memory', 'none')
-                    resource_info.append(f"Requests: CPU={req_cpu}, Mem={req_mem}")
-                
-                if limits:
-                    lim_cpu = limits.get('cpu', 'none')
-                    lim_mem = limits.get('memory', 'none')
-                    resource_info.append(f"Limits: CPU={lim_cpu}, Mem={lim_mem}")
-        
-        # Get current usage if metrics-server is available
-        top_cmd = f"kubectl top pod {pod_name} -n {namespace} --no-headers 2>/dev/null"
-        top_result = run_command(top_cmd)
-        
-        if top_result['exit_code'] == 0 and top_result['stdout']:
-            parts = top_result['stdout'].split()
-            if len(parts) >= 3:
-                current_cpu = parts[1]
-                current_mem = parts[2]
-                resource_info.append(f"Current: CPU={current_cpu}, Mem={current_mem}")
-        
-        if resource_info:
-            return [{
-                "name": "immudb_resource_usage",
-                "description": "Check ImmuDB resource usage and limits",
-                "passed": True,
-                "output": " | ".join(resource_info),
-                "severity": "LOW"
-            }]
+        # Print enabled policies for debugging
+        enabled_policies = [k for k, v in POLICIES.items() if v]
+        if enabled_policies:
+            print(f"# Enabled policies: {', '.join(enabled_policies)}", file=sys.stderr)
         else:
-            return [{
-                "name": "immudb_resource_usage",
-                "description": "Check ImmuDB resource usage and limits",
-                "passed": True,
-                "output": "No resource limits configured - using default/unlimited resources",
-                "severity": "WARNING"
-            }]
-            
+            print("# No policies enabled via environment variables", file=sys.stderr)
+        
+        # Run tests
+        results = test_opa_gatekeeper()
+        
+        # Output JSON results
+        print(json.dumps(results, indent=2))
+        
+        # Exit with appropriate code
+        critical_failures = [r for r in results if r['severity'] == 'critical' and not r['status']]
+        sys.exit(1 if critical_failures else 0)
+        
     except Exception as e:
-        return [{
-            "name": "immudb_resource_usage",
-            "description": "Check ImmuDB resource usage and limits",
-            "passed": False,
-            "output": f"Failed to parse resources: {str(e)}",
-            "severity": "WARNING"
+        # Emergency fallback
+        error_result = [{
+            "name": "script_error",
+            "description": "Script execution error",
+            "status": False,
+            "output": str(e),
+            "severity": "critical"
         }]
+        print(json.dumps(error_result, indent=2))
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
