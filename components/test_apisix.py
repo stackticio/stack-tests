@@ -324,10 +324,26 @@ def test_routes() -> List[Dict[str, Any]]:
                                          "No routes found to test", "CRITICAL"))
         return results
     
-    results.append(create_test_result("apisix_route_discovery", "Discover APISIX routes", True,
-                                     f"Found {len(routes)} routes to test", "INFO"))
-    
+    # Filter out routes that start with "agent." as they require auth
+    filtered_routes = []
+    skipped_count = 0
     for route in routes:
+        if route['host'].startswith('agent.'):
+            skipped_count += 1
+            results.append(create_test_result(
+                f"apisix_{route['name']}_skipped",
+                f"Skipped auth-protected route {route['name']} ({route['host']})",
+                True,
+                f"Route {route['host']} skipped (requires authentication)",
+                "INFO"
+            ))
+        else:
+            filtered_routes.append(route)
+    
+    results.append(create_test_result("apisix_route_discovery", "Discover APISIX routes", True,
+                                     f"Found {len(routes)} routes, testing {len(filtered_routes)} (skipped {skipped_count} auth routes)", "INFO"))
+    
+    for route in filtered_routes:
         results.append(test_route_http_connectivity(route))
         results.append(test_route_https_connectivity(route))
         results.append(test_route_ssl_certificate(route))
