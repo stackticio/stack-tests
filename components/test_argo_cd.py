@@ -1,27 +1,40 @@
-
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ArgoCD Health Check Script
-Tests various aspects of ArgoCD deployment and applications
-Returns results in JSON format with no external dependencies
+test_argocd_dynamic.py - Dynamic ArgoCD tester that discovers and tests all applications
+Tests ArgoCD server health, application sync status, and resource health
+
+ENV VARS:
+  ARGOCD_NS (default: argocd)
+  ARGOCD_SERVER (default: argo-cd-argocd-server)
+  ARGOCD_PORT (default: 80)
+  ARGOCD_USERNAME (default: admin)
+  ARGOCD_PASSWORD (default: fetched from secret)
+  ARGOCD_INSECURE (default: true)
+
+Output: JSON array of test results to stdout
+Each result: {
+  name, description, status (bool), severity (info|warning|critical), output
+}
 """
 
-import subprocess
-import json
-import sys
-import re
-from typing import Dict, List
-from datetime import datetime
-from collections import defaultdict
 import os
+import sys
+import json
+import subprocess
+import base64
+import time
+import re
+from typing import List, Dict, Any, Optional, Tuple
+from collections import defaultdict
+from datetime import datetime
 
-NAMESPACE = "argocd"
-TEST_RESULTS = []
-    
-def run_command(command: str, env: Dict = None, timeout: int = 10) -> Dict:
-    """Helper to run a shell command and capture stdout/stderr/exit code"""
+# ------------------------------------------------------------
+# Utilities & configuration
+# ------------------------------------------------------------
+
+def run_command(command: str, env: Optional[Dict[str, str]] = None, timeout: int = 30) -> Dict[str, Any]:
+    """Run a shell command and capture stdout/stderr/exit code."""
     try:
         completed = subprocess.run(
             command,
@@ -32,664 +45,533 @@ def run_command(command: str, env: Dict = None, timeout: int = 10) -> Dict:
             timeout=timeout
         )
         return {
-            "stdout": completed.stdout.strip(),
-            "stderr": completed.stderr.strip(),
+            "stdout": (completed.stdout or '').strip(),
+            "stderr": (completed.stderr or '').strip(),
             "exit_code": completed.returncode
         }
     except subprocess.TimeoutExpired:
         return {"stdout": "", "stderr": "Timeout", "exit_code": 124}
 
-def test_argocd_pods() -> List[Dict]:
-    """Check if all ArgoCD core components are running"""
-    name = "argocd_pods_health"
-    
-    cmd = f"kubectl get pods -n {NAMESPACE} -o json"
-    stdout, stderr, returncode = run_command(cmd)
-    
-    if returncode != 0:
-        return [{
-            "name": name,
-            "status": False,
-            "output": f"Failed to get pods: {stderr}",
-            "severity": "WARNING"  
-        }]
-    
-    try:
-        pods_data = json.loads(stdout)
-        unhealthy_pods = []
-        component_status = {}
-        
-        # Define critical components
-        critical_components = [
-            "application-controller",
-            "repo-server",
-            "server",
-            "redis"
-        ]
-        
-        for pod in pods_data.get("items", []):
-            pod_name = pod["metadata"]["name"]
-            pod_status = pod["status"]["phase"]
-            
-            # Get component from labels
-            labels = pod["metadata"].get("labels", {})
-            component = labels.get("app.kubernetes.io/component", "unknown")
-            
-            # Check if all containers are ready
-            ready = all(
-                container.get("ready", False) 
-                for container in pod["status"].get("containerStatuses", [])
-            )
-            
-            component_status[component] = {
-                "pod": pod_name,
-                "status": pod_status,
-                "ready": ready
-            }
-            
-            if pod_status != "Running" or not ready:
-                unhealthy_pods.append(f"{pod_name} (Component: {component}, Status: {pod_status}, Ready: {ready})")
-        
-        # Check for missing critical components
-        missing_components = []
-        for comp in critical_components:
-            if comp not in component_status:
-                missing_components.append(comp)
-        
-        if missing_components:
-            return [{
-                "name": name,
-                "status": False,
-                "output": f"Missing critical components: {', '.join(missing_components)}",
-                "severity": "CRITICAL"  
-            }]
-        
-        if unhealthy_pods:
-            return [{
-                "name": name,
-                "status": False,
-                "output": f"Unhealthy pods found: {', '.join(unhealthy_pods)}",
-                "severity": "CRITICAL"  
-            }]
-        
-        total_pods = len(pods_data.get("items", []))
-        components_list = ', '.join([f"{k}:OK" for k in component_status.keys()])
-        return [{
-                "name": name,
-                "status": True,
-                "output": f"All {total_pods} ArgoCD pods are healthy. Components: {components_list}",
-                "severity": "INFO"  
-            }]
-        
-    except json.JSONDecodeError as e:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Failed to parse pod data: {str(e)}",
-                "severity": "CRITICAL"  
-            }]
 
-def test_applications_sync_status() -> List[Dict]:
-    """Check sync status of all ArgoCD applications"""
-    name = "applications_sync_status"
-    
-    cmd = f"kubectl get Application -n {NAMESPACE} -o json"
-    stdout, stderr, returncode = run_command(cmd)
-    
-    if returncode != 0:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Failed to get applications: {stderr}",
-                "severity": "WARNING"  
-            }]
-    
-    try:
-        apps_data = json.loads(stdout)
-        sync_stats = defaultdict(list)
-        
-        for app in apps_data.get("items", []):
-            app_name = app["metadata"]["name"]
-            sync_status = app.get("status", {}).get("sync", {}).get("status", "Unknown")
-            
-            sync_stats[sync_status].append(app_name)
-        
-        total_apps = len(apps_data.get("items", []))
-        
-        # Build detailed output
-        output_lines = [f"Total applications: {total_apps}"]
-        
-        # Determine severity based on sync status
-        severity = "INFO"
-        passed = True
-        
-        if sync_stats.get("Synced"):
-            output_lines.append(f"[OK] Synced ({len(sync_stats['Synced'])}): {', '.join(sync_stats['Synced'][:5])}")
-        
-        if sync_stats.get("OutOfSync"):
-            output_lines.append(f"[WARN] OutOfSync ({len(sync_stats['OutOfSync'])}): {', '.join(sync_stats['OutOfSync'])}")
-            severity = "WARNING"
-            passed = False
-        
-        if sync_stats.get("Unknown"):
-            output_lines.append(f"[?] Unknown ({len(sync_stats['Unknown'])}): {', '.join(sync_stats['Unknown'])}")
-            if len(sync_stats['Unknown']) > total_apps * 0.5:  # More than 50% unknown
-                severity = "CRITICAL"
-                passed = False
-        
-        # Check for other statuses
-        other_statuses = [s for s in sync_stats.keys() if s not in ["Synced", "OutOfSync", "Unknown"]]
-        if other_statuses:
-            for status in other_statuses:
-                output_lines.append(f"[*] {status} ({len(sync_stats[status])}): {', '.join(sync_stats[status])}")
-        
-        output = " | ".join(output_lines)
-        
-        # If all apps are synced, mark as passed
-        if len(sync_stats.get("Synced", [])) == total_apps:
-            passed = True
-            severity = "INFO"
-            output = f"All {total_apps} applications are synced successfully"
-        
-        return [{
-                "name": name,
-                "status": passed,
-                "output": output,
-                "severity": severity  
-            }]
-        
-    except Exception as e:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Failed to parse application data: {str(e)}",
-                "severity": "WARNING"  
-            }]
+def ok(proc: Dict[str, Any]) -> bool:
+    """Check if command executed successfully"""
+    return proc.get("exit_code", 1) == 0
 
-def test_applications_health_status() -> List[Dict]:
-    """Check health status of all ArgoCD applications"""
-    name = "applications_health_status"
-    
-    cmd = f"kubectl get Application -n {NAMESPACE} -o json"
-    stdout, stderr, returncode = run_command(cmd)
-    
-    if returncode != 0:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Failed to get applications: {stderr}",
-                "severity": "WARNING"  
-            }]
-    
-    try:
-        apps_data = json.loads(stdout)
-        health_stats = defaultdict(list)
-        
-        for app in apps_data.get("items", []):
-            app_name = app["metadata"]["name"]
-            health_status = app.get("status", {}).get("health", {}).get("status", "Unknown")
-            
-            health_stats[health_status].append(app_name)
-        
-        total_apps = len(apps_data.get("items", []))
-        
-        # Build detailed output
-        output_lines = [f"Total applications: {total_apps}"]
-        
-        # Determine severity based on health status
-        severity = "INFO"
-        passed = True
-        
-        if health_stats.get("Healthy"):
-            output_lines.append(f"[OK] Healthy ({len(health_stats['Healthy'])}): {', '.join(health_stats['Healthy'][:5])}")
-        
-        if health_stats.get("Degraded"):
-            output_lines.append(f"[WARN] Degraded ({len(health_stats['Degraded'])}): {', '.join(health_stats['Degraded'])}")
-            severity = "WARNING"
-            passed = False
-        
-        if health_stats.get("Progressing"):
-            output_lines.append(f"[PROG] Progressing ({len(health_stats['Progressing'])}): {', '.join(health_stats['Progressing'])}")
-            # Progressing is not necessarily bad
-        
-        if health_stats.get("Missing"):
-            output_lines.append(f"[ERR] Missing ({len(health_stats['Missing'])}): {', '.join(health_stats['Missing'])}")
-            severity = "CRITICAL"
-            passed = False
-        
-        if health_stats.get("Unknown"):
-            output_lines.append(f"[?] Unknown ({len(health_stats['Unknown'])}): {', '.join(health_stats['Unknown'])}")
-        
-        if health_stats.get("Suspended"):
-            output_lines.append(f"[PAUSE] Suspended ({len(health_stats['Suspended'])}): {', '.join(health_stats['Suspended'])}")
-        
-        output = " | ".join(output_lines)
-        
-        # If most apps are healthy or progressing, consider it acceptable
-        healthy_count = len(health_stats.get("Healthy", [])) + len(health_stats.get("Progressing", []))
-        if healthy_count >= total_apps * 0.7:  # 70% healthy/progressing
-            if not health_stats.get("Missing"):  # No missing apps
-                passed = True
-                if health_stats.get("Degraded"):
-                    severity = "WARNING"
-                else:
-                    severity = "INFO"
-        
-        return [{
-                "name": name,
-                "status": passed,
-                "output": output,
-                "severity": severity  
-            }]
-        
-    except Exception as e:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Failed to parse application health data: {str(e)}",
-                "severity": "WARNING"  
-            }]
 
-def test_argocd_server_api() -> List[Dict]:
-    """Check if ArgoCD Server API is responding"""
-    name = "argocd_server_api_health"
+def get_config() -> Dict[str, str]:
+    """Get configuration from environment or defaults"""
+    # Try to get admin password from secret
+    password_cmd = "kubectl get secret argocd-secret -n argocd -o jsonpath='{.data.admin\\.password}' 2>/dev/null"
+    result = run_command(password_cmd)
     
-    # Get server pod
-    cmd = f"kubectl get pods -n {NAMESPACE} -l app.kubernetes.io/component=server -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_name, stderr, returncode = run_command(cmd)
-    
-    if returncode != 0 or not pod_name.strip():
-        return [{
-                "name": name,
-                "status": False,
-                "output": "ArgoCD Server pod not found",
-                "severity": "CRITICAL"  
-            }]
-    
-    pod_name = pod_name.strip()
-    
-    # Check API health endpoint
-    api_check_cmd = f"kubectl exec -n {NAMESPACE} {pod_name} -- curl -s -k https://localhost:8080/api/v1/applications"
-    stdout, stderr, returncode = run_command(api_check_cmd)
-    
-    if returncode == 0:
-        # Check if response is valid JSON (API is working)
+    admin_password = ""
+    if ok(result) and result["stdout"]:
         try:
-            json.loads(stdout)
-            return [{
-                "name": name,
-                "status": True,
-                "output": f"ArgoCD Server API is healthy and responding (pod: {pod_name})",
-                "severity": "INFO"  
-            }]
+            admin_password = base64.b64decode(result["stdout"]).decode('utf-8')
         except:
-            return [{
-                "name": name,
-                "status": True,
-                "output": f"ArgoCD Server is running but API response format unexpected (pod: {pod_name})",
-                "severity": "WARNING"  
-            }]
-    else:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"ArgoCD Server API is not responding properly",
-                "severity": "CRITICAL"  
-            }]
+            admin_password = os.getenv("ARGOCD_PASSWORD", "admin")
+    
+    return {
+        "namespace": os.getenv("ARGOCD_NS", "argocd"),
+        "server": os.getenv("ARGOCD_SERVER", "argo-cd-argocd-server"),
+        "port": os.getenv("ARGOCD_PORT", "80"),
+        "username": os.getenv("ARGOCD_USERNAME", "admin"),
+        "password": admin_password or os.getenv("ARGOCD_PASSWORD", "admin"),
+        "insecure": os.getenv("ARGOCD_INSECURE", "true").lower() == "true"
+    }
 
-def test_redis_connectivity() -> List[Dict]:
-    """Check if Redis is accessible and functioning"""
-    name = "redis_connectivity"
-    
-    # Get redis pod
-    cmd = f"kubectl get pods -n {NAMESPACE} -l app.kubernetes.io/component=redis -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_name, stderr, returncode = run_command(cmd)
-    
-    if returncode != 0 or not pod_name.strip():
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"ArgoCD Server API is not responding properly",
-                "severity": "CRITICAL"  
-            }]
-    
-    pod_name = pod_name.strip()
-    
-    # Check Redis ping
-    redis_check_cmd = f"kubectl exec -n {NAMESPACE} {pod_name} -- redis-cli ping"
-    stdout, stderr, returncode = run_command(redis_check_cmd)
-    
-    if returncode == 0 and "PONG" in stdout:
-        # Check Redis memory usage
-        memory_cmd = f"kubectl exec -n {NAMESPACE} {pod_name} -- redis-cli info memory | grep used_memory_human"
-        mem_stdout, _, _ = run_command(memory_cmd)
-        
-        memory_info = ""
-        if mem_stdout:
-            memory_info = f", Memory: {mem_stdout.strip().split(':')[-1]}"
-        
-        return [{
-                "name": name,
-                "status": True,
-                "output": f"Redis is healthy and responding (pod: {pod_name}{memory_info})",
-                "severity": "INFO"  
-            }]
-    else:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Redis is not responding to ping",
-                "severity": "CRITICAL"  
-            }]
 
-def test_repo_server_connectivity() -> List[Dict]:
-    """Check if Repository Server is functioning properly"""
-    name = "repo_server_health"
+def kubectl_get_json(resource: str, namespace: str = None, name: str = None) -> Dict[str, Any]:
+    """Get Kubernetes resource as JSON"""
+    ns_flag = f"-n {namespace}" if namespace else "-A"
+    resource_name = name if name else ""
     
-    # Get repo server pod
-    cmd = f"kubectl get pods -n {NAMESPACE} -l app.kubernetes.io/component=repo-server -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_name, stderr, returncode = run_command(cmd)
+    cmd = f"kubectl get {resource} {resource_name} {ns_flag} -o json 2>/dev/null"
+    result = run_command(cmd)
     
-    if returncode != 0 or not pod_name.strip():
-        return [{
-                "name": name,
-                "status": False,
-                "output": "Repository Server pod not found",
-                "severity": "CRITICAL"  
-            }]
-    
-    pod_name = pod_name.strip()
-    
-    # Check recent logs for errors
-    log_cmd = f"kubectl logs -n {NAMESPACE} {pod_name} --tail=100 2>/dev/null | grep -E 'error|Error|ERROR' | wc -l"
-    error_count, _, _ = run_command(log_cmd)
-    
-    try:
-        error_count = int(error_count.strip())
-    except:
-        error_count = 0
-    
-    # Check if repo server is processing manifests (look for successful operations)
-    success_cmd = f"kubectl logs -n {NAMESPACE} {pod_name} --tail=100 2>/dev/null | grep -E 'success|Success|generated|Generated' | wc -l"
-    success_count, _, _ = run_command(success_cmd)
-    
-    try:
-        success_count = int(success_count.strip())
-    except:
-        success_count = 0
-    
-    if error_count > 20:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Repository Server has {error_count} errors in recent logs (pod: {pod_name})",
-                "severity": "WARNING"  
-            }]
-    elif success_count > 0:
-        return [{
-                "name": name,
-                "status": True,
-                "output": f"Repository Server is processing manifests successfully (pod: {pod_name})",
-                "severity": "INFO"  
-            }]
-    else:
-        return [{
-                "name": name,
-                "status": True,
-                "output": f"Repository Server is running (pod: {pod_name})",
-                "severity": "INFO"  
-            }]
-
-def test_application_controller() -> List[Dict]:
-    """Check if Application Controller is functioning properly"""
-    name = "application_controller_health"
-    
-    # Get application controller pod
-    cmd = f"kubectl get pods -n {NAMESPACE} -l app.kubernetes.io/component=application-controller -o jsonpath='{{.items[0].metadata.name}}'"
-    pod_name, stderr, returncode = run_command(cmd)
-    
-    if returncode != 0 or not pod_name.strip():
-        return [{
-                "name": name,
-                "status": False,
-                "output": "Application Controller pod not found",
-                "severity": "CRITICAL"  
-            }]
-    
-    pod_name = pod_name.strip()
-    
-    # Check for reconciliation errors
-    error_cmd = f"kubectl logs -n {NAMESPACE} {pod_name} --tail=200 2>/dev/null | grep -E 'Failed to reconcile|reconciliation error|error syncing' | wc -l"
-    error_count, _, _ = run_command(error_cmd)
-    
-    try:
-        error_count = int(error_count.strip())
-    except:
-        error_count = 0
-    
-    # Check for successful reconciliations
-    success_cmd = f"kubectl logs -n {NAMESPACE} {pod_name} --tail=200 2>/dev/null | grep -E 'Reconciliation completed|successfully synced|Synced application' | wc -l"
-    success_count, _, _ = run_command(success_cmd)
-    
-    try:
-        success_count = int(success_count.strip())
-    except:
-        success_count = 0
-    
-    if error_count > 50:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Application Controller has {error_count} reconciliation errors in recent logs",
-                "severity": "CRITICAL"  
-            }]
-    elif error_count > 10:
-        return [{
-                "name": name,
-                "status": True,
-                "output": f"Application Controller is running with {error_count} errors in recent logs",
-                "severity": "WARNING"  
-            }]
-    else:
-        return [{
-                "name": name,
-                "status": True,
-                "output": f"Application Controller is healthy, {success_count} successful operations in recent logs",
-                "severity": "INFO"  
-            }]
-
-def test_failed_applications() -> List[Dict]:
-    """Analyze failed or degraded applications for root causes"""
-    name = "failed_applications_analysis"
-    
-    cmd = f"kubectl get Application -n {NAMESPACE} -o json"
-    stdout, stderr, returncode = run_command(cmd)
-    
-    if returncode != 0:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Failed to get applications: {stderr}",
-                "severity": "WARNING"  
-            }]
-    
-    try:
-        apps_data = json.loads(stdout)
-        problematic_apps = []
-        
-        for app in apps_data.get("items", []):
-            app_name = app["metadata"]["name"]
-            health_status = app.get("status", {}).get("health", {}).get("status", "Unknown")
-            sync_status = app.get("status", {}).get("sync", {}).get("status", "Unknown")
-            
-            if health_status in ["Degraded", "Missing"] or sync_status == "OutOfSync":
-                # Get more details about the problem
-                conditions = app.get("status", {}).get("conditions", [])
-                operation_state = app.get("status", {}).get("operationState", {})
-                
-                problem_details = {
-                    "name": app_name,
-                    "health": health_status,
-                    "sync": sync_status,
-                    "message": ""
-                }
-                
-                # Check for error messages
-                if operation_state.get("message"):
-                    problem_details["message"] = operation_state["message"][:100]  # First 100 chars
-                elif conditions:
-                    for condition in conditions:
-                        if condition.get("message"):
-                            problem_details["message"] = condition["message"][:100]
-                            break
-                
-                problematic_apps.append(problem_details)
-        
-        if not problematic_apps:
-            return [{
-                "name": name,
-                "status": True,
-                "output": "No failed or degraded applications found",
-                "severity": "INFO"  
-            }]
-        else:
-            # Format output
-            output_lines = [f"Found {len(problematic_apps)} problematic applications:"]
-            for app in problematic_apps[:5]:  # Show first 5
-                msg = f" - {app['name']}: Health={app['health']}, Sync={app['sync']}"
-                if app['message']:
-                    msg += f", Error: {app['message']}"
-                output_lines.append(msg)
-            
-            if len(problematic_apps) > 5:
-                output_lines.append(f"... and {len(problematic_apps) - 5} more")
-            
-            severity = "CRITICAL" if any(a['health'] == "Missing" for a in problematic_apps) else "WARNING"
-            
-            return [{
-                "name": name,
-                "status": False,
-                "output": "\n".join(output_lines),
-                "severity": severity  
-            }]
-            
-    except Exception as e:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Failed to analyze application failures: {str(e)}",
-                "severity": "WARNING"  
-            }]
-
-def test_argocd_certificates() -> List[Dict]:
-    """Check ArgoCD TLS certificates and secrets"""
-    name = "certificates_health"
-    
-    # Check for ArgoCD server TLS secret
-    cmd = f"kubectl get secret -n {NAMESPACE} argocd-server-tls -o json 2>/dev/null"
-    stdout, stderr, returncode = run_command(cmd)
-    
-    if returncode != 0:
-        # Try alternative secret names
-        alt_cmd = f"kubectl get secret -n {NAMESPACE} -l app.kubernetes.io/component=server | grep tls"
-        alt_stdout, _, alt_returncode = run_command(alt_cmd)
-        
-        if alt_returncode != 0:
-            return [{
-                "name": name,
-                "status": True,
-                "output": "No TLS certificates configured (running in HTTP mode)",
-                "severity": "INFO"  
-            }]
-    
-    try:
-        if stdout:
-            secret_data = json.loads(stdout)
-            # Check if certificate data exists
-            if "data" in secret_data and "tls.crt" in secret_data["data"]:
-                return [{
-                    "name": name,
-                    "status": True,
-                    "output": "TLS certificates are configured for ArgoCD Server",
-                    "severity": "INFO"  
-                }]
-            else:
-                return [{
-                    "name": name,
-                    "status": False,
-                    "output": "TLS secret exists but certificate data is missing",
-                    "severity": "WARNING"  
-                }]
-        else:
-            return [{
-                    "name": name,
-                    "status": True,
-                    "output": "ArgoCD is running without TLS (HTTP mode)",
-                    "severity": "INFO"  
-                }]
-            
-    except Exception as e:
-        return [{
-                "name": name,
-                "status": True,
-                "output": f"Could not verify certificate status: {str(e)}",
-                "severity": "INFO"  
-            }]
-
-def test_argocd_rbac() -> List[Dict]:
-    """Check ArgoCD RBAC and ServiceAccount configuration"""
-    name = "rbac_configuration"
-    
-    # Check for ArgoCD service accounts
-    cmd = f"kubectl get serviceaccount -n {NAMESPACE} -o json"
-    stdout, stderr, returncode = run_command(cmd)
-    
-    if returncode != 0:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Failed to get service accounts: {stderr}",
-                "severity": "WARNING"  
-            }]
-    
-    try:
-        sa_data = json.loads(stdout)
-        argocd_sas = []
-        
-        for sa in sa_data.get("items", []):
-            sa_name = sa["metadata"]["name"]
-            if "argocd" in sa_name.lower():
-                argocd_sas.append(sa_name)
-        
-        if not argocd_sas:
-            return [{
-                "name": name,
-                "status": False,
-                "output": "No ArgoCD service accounts found",
-                "severity": "CRITICAL"  
-            }]
-        
-        # Check for cluster role bindings
-        crb_cmd = f"kubectl get clusterrolebinding -o json | grep -c '{NAMESPACE}'"
-        crb_count, _, _ = run_command(crb_cmd)
-        
+    if ok(result) and result["stdout"]:
         try:
-            crb_count = int(crb_count.strip())
-        except:
-            crb_count = 0
-        
-        return [{
-                "name": name,
-                "status": True,
-                "output": f"Found {len(argocd_sas)} ArgoCD service accounts and {crb_count} cluster role bindings",
-                "severity": "INFO"  
-            }]
-        
-    except Exception as e:
-        return [{
-                "name": name,
-                "status": False,
-                "output": f"Failed to check RBAC configuration: {str(e)}",
-                "severity": "WARNING"  
-            }]
+            return json.loads(result["stdout"])
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
+
+# ------------------------------------------------------------
+# Result helper
+# ------------------------------------------------------------
+
+def create_test_result(name: str, description: str, passed: bool, output: str, severity: str = "INFO") -> Dict[str, Any]:
+    """Create standardized test result"""
+    return {
+        "name": name,
+        "description": description,
+        "status": bool(passed),
+        "output": output,
+        "severity": severity.lower(),
+    }
+
+
+# ------------------------------------------------------------
+# Tests
+# ------------------------------------------------------------
+
+def check_argocd_deployment() -> List[Dict[str, Any]]:
+    """Test ArgoCD deployment components"""
+    config = get_config()
+    tests: List[Dict[str, Any]] = []
+    
+    # Core ArgoCD components
+    components = [
+        ("application-controller", "Controls application lifecycle", True),
+        ("server", "API and UI server", True),
+        ("repo-server", "Repository server", True),
+        ("redis", "Cache and session storage", True),
+        ("applicationset-controller", "ApplicationSet controller", False),
+        ("image-updater", "Image updater", False)
+    ]
+    
+    for component, description, critical in components:
+        deployment_name = f"argo-cd-argocd-{component}"
+        deployment = kubectl_get_json("deployment", config["namespace"], deployment_name)
+        
+        if deployment and "spec" in deployment:
+            spec_replicas = deployment["spec"].get("replicas", 0)
+            ready_replicas = deployment.get("status", {}).get("readyReplicas", 0)
+            status = ready_replicas == spec_replicas and spec_replicas > 0
+            output = f"{'✓' if status else '✗'} {ready_replicas}/{spec_replicas} replicas ready"
+            severity = "critical" if (critical and not status) else "warning" if not status else "info"
+        else:
+            status = False
+            output = "✗ Deployment not found"
+            severity = "critical" if critical else "warning"
+        
+        tests.append(create_test_result(
+            f"deployment_{component}",
+            f"ArgoCD {description}",
+            status,
+            output,
+            severity
+        ))
+    
+    return tests
+
+
+def check_argocd_services() -> List[Dict[str, Any]]:
+    """Test ArgoCD services availability"""
+    config = get_config()
+    tests: List[Dict[str, Any]] = []
+    
+    services = kubectl_get_json("service", config["namespace"])
+    
+    if services and "items" in services:
+        for svc in services["items"]:
+            svc_name = svc["metadata"]["name"]
+            svc_type = svc["spec"].get("type", "Unknown")
+            ports = svc["spec"].get("ports", [])
+            
+            port_info = ", ".join([f"{p.get('port')}:{p.get('targetPort', 'N/A')}" for p in ports])
+            
+            tests.append(create_test_result(
+                f"service_{svc_name.replace('-', '_')}",
+                f"Service: {svc_name}",
+                True,
+                f"✓ {svc_type} - Ports: {port_info}",
+                "info"
+            ))
+    else:
+        tests.append(create_test_result(
+            "services_check",
+            "ArgoCD services",
+            False,
+            "✗ No services found",
+            "critical"
+        ))
+    
+    return tests
+
+
+def check_argocd_server_health() -> List[Dict[str, Any]]:
+    """Test ArgoCD server health endpoint"""
+    config = get_config()
+    tests: List[Dict[str, Any]] = []
+    
+    # Try to access health endpoint through kubectl exec
+    cmd = f"""kubectl exec -n {config['namespace']} deployment/argo-cd-argocd-server -- \
+        curl -s -o /dev/null -w '%{{http_code}}' http://localhost:8080/healthz 2>/dev/null"""
+    
+    result = run_command(cmd, timeout=15)
+    
+    if ok(result):
+        http_code = result["stdout"].strip()
+        status = http_code == "200"
+        output = f"{'✓' if status else '✗'} HTTP {http_code}"
+        severity = "critical" if not status else "info"
+    else:
+        status = False
+        output = "✗ Health check failed"
+        severity = "critical"
+    
+    tests.append(create_test_result(
+        "server_health",
+        "ArgoCD server health endpoint",
+        status,
+        output,
+        severity
+    ))
+    
+    return tests
+
+
+def check_applications() -> List[Dict[str, Any]]:
+    """Test all ArgoCD applications"""
+    tests: List[Dict[str, Any]] = []
+    
+    applications = kubectl_get_json("application.argoproj.io", "argocd")
+    
+    if not applications or "items" not in applications:
+        tests.append(create_test_result(
+            "application_discovery",
+            "Application discovery",
+            False,
+            "✗ No applications found",
+            "critical"
+        ))
+        return tests
+    
+    app_count = len(applications["items"])
+    tests.append(create_test_result(
+        "application_discovery",
+        "Application discovery",
+        True,
+        f"✓ Found {app_count} applications",
+        "info"
+    ))
+    
+    # Test each application
+    for app in applications["items"]:
+        metadata = app.get("metadata", {})
+        spec = app.get("spec", {})
+        status = app.get("status", {})
+        
+        app_name = metadata.get("name", "unknown")
+        sync_status = status.get("sync", {}).get("status", "Unknown")
+        health_status = status.get("health", {}).get("status", "Unknown")
+        operation_state = status.get("operationState", {}).get("phase", "")
+        resources = status.get("resources", [])
+        
+        # Application sync status
+        is_synced = sync_status == "Synced"
+        sync_severity = "critical" if sync_status == "OutOfSync" else "warning" if sync_status == "Unknown" else "info"
+        
+        tests.append(create_test_result(
+            f"app_{app_name}_sync",
+            f"Application {app_name} sync status",
+            is_synced,
+            f"{'✓' if is_synced else '✗'} Sync: {sync_status}",
+            sync_severity
+        ))
+        
+        # Application health status
+        is_healthy = health_status in ["Healthy", "Progressing"]
+        health_severity = "critical" if health_status in ["Degraded", "Missing"] else "warning" if health_status == "Unknown" else "info"
+        
+        tests.append(create_test_result(
+            f"app_{app_name}_health",
+            f"Application {app_name} health status",
+            is_healthy,
+            f"{'✓' if is_healthy else '✗'} Health: {health_status}",
+            health_severity
+        ))
+        
+        # Test resources by kind
+        if resources:
+            resources_by_kind = defaultdict(list)
+            for resource in resources:
+                kind = resource.get("kind", "Unknown")
+                resources_by_kind[kind].append(resource)
+            
+            # Only test first 3 resource kinds to avoid too many tests
+            for kind, res_list in list(resources_by_kind.items())[:3]:
+                healthy_count = sum(1 for r in res_list if r.get("health", {}).get("status") == "Healthy")
+                total_count = len(res_list)
+                
+                all_healthy = healthy_count == total_count
+                severity = "critical" if healthy_count == 0 else "warning" if healthy_count < total_count else "info"
+                
+                tests.append(create_test_result(
+                    f"app_{app_name}_resources_{kind.lower()}",
+                    f"{app_name} - {kind} resources",
+                    all_healthy,
+                    f"{'✓' if all_healthy else '⚠'} {healthy_count}/{total_count} healthy",
+                    severity
+                ))
+    
+    return tests
+
+
+def check_application_logs(time_window_minutes: int = 5) -> List[Dict[str, Any]]:
+    """Check logs for critical applications"""
+    tests: List[Dict[str, Any]] = []
+    config = get_config()
+    
+    # Check logs for ArgoCD components
+    components = ["application-controller", "server", "repo-server"]
+    
+    error_patterns = [
+        r'level=error',
+        r'level=fatal',
+        r'Failed to sync',
+        r'Error syncing',
+        r'authentication failed',
+        r'permission denied',
+        r'OutOfSync',
+    ]
+    
+    for component in components:
+        deployment_name = f"argo-cd-argocd-{component}"
+        
+        # Get pod name
+        cmd = f"kubectl get pods -n {config['namespace']} -l app.kubernetes.io/component={component} -o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null"
+        result = run_command(cmd, timeout=10)
+        
+        if not ok(result) or not result["stdout"]:
+            tests.append(create_test_result(
+                f"logs_{component}",
+                f"Log analysis for {component}",
+                False,
+                f"✗ Pod not found",
+                "warning"
+            ))
+            continue
+        
+        pod_name = result["stdout"]
+        
+        # Get logs
+        log_cmd = f"kubectl logs -n {config['namespace']} {pod_name} --since={time_window_minutes}m 2>&1 | tail -200"
+        log_result = run_command(log_cmd, timeout=20)
+        
+        errors_found: List[str] = []
+        if log_result["stdout"]:
+            for line in log_result["stdout"].splitlines():
+                if any(re.search(pat, line, re.IGNORECASE) for pat in error_patterns):
+                    errors_found.append(line[:200])
+        
+        if errors_found:
+            tests.append(create_test_result(
+                f"logs_{component}",
+                f"Log analysis for {component} (last {time_window_minutes}m)",
+                False,
+                f"⚠ Found {len(errors_found)} error lines",
+                "warning"
+            ))
+        else:
+            tests.append(create_test_result(
+                f"logs_{component}",
+                f"Log analysis for {component} (last {time_window_minutes}m)",
+                True,
+                f"✓ No critical errors detected",
+                "info"
+            ))
+    
+    return tests
+
+
+def check_argocd_cli_access() -> List[Dict[str, Any]]:
+    """Test ArgoCD CLI access through stack-agent"""
+    tests: List[Dict[str, Any]] = []
+    config = get_config()
+    
+    # Test if argocd CLI is available in stack-agent
+    cmd = "kubectl exec -n stack-agent deployment/stack-agent -- which argocd 2>/dev/null"
+    result = run_command(cmd, timeout=10)
+    
+    if ok(result) and result["stdout"]:
+        tests.append(create_test_result(
+            "argocd_cli_available",
+            "ArgoCD CLI availability in stack-agent",
+            True,
+            f"✓ ArgoCD CLI found at {result['stdout']}",
+            "info"
+        ))
+        
+        # Try to login and list apps
+        login_cmd = f"""kubectl exec -n stack-agent deployment/stack-agent -- \
+            argocd login {config['server']}:{config['port']} \
+            --username {config['username']} \
+            --password '{config['password']}' \
+            --insecure --grpc-web 2>&1"""
+        
+        login_result = run_command(login_cmd, timeout=15)
+        
+        if ok(login_result):
+            tests.append(create_test_result(
+                "argocd_cli_login",
+                "ArgoCD CLI login test",
+                True,
+                f"✓ Successfully logged in",
+                "info"
+            ))
+        else:
+            tests.append(create_test_result(
+                "argocd_cli_login",
+                "ArgoCD CLI login test",
+                False,
+                f"✗ Login failed: {login_result['stderr'] or login_result['stdout']}",
+                "warning"
+            ))
+    else:
+        tests.append(create_test_result(
+            "argocd_cli_available",
+            "ArgoCD CLI availability in stack-agent",
+            False,
+            f"✗ ArgoCD CLI not found in stack-agent",
+            "warning"
+        ))
+    
+    return tests
+
+
+def generate_summary(all_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Generate overall summary"""
+    # Count results by status and severity
+    total_tests = len(all_results)
+    passed_tests = sum(1 for r in all_results if r.get("status") == True)
+    failed_tests = sum(1 for r in all_results if r.get("status") == False)
+    critical_issues = sum(1 for r in all_results if r.get("severity") == "critical" and not r.get("status"))
+    warnings = sum(1 for r in all_results if r.get("severity") == "warning" and not r.get("status"))
+    
+    # Count application-specific metrics
+    app_sync_tests = [r for r in all_results if "_sync" in r.get("name", "")]
+    app_health_tests = [r for r in all_results if "_health" in r.get("name", "") and "server_health" not in r.get("name", "")]
+    
+    synced_apps = sum(1 for r in app_sync_tests if r.get("status") == True)
+    total_apps = len(app_sync_tests)
+    healthy_apps = sum(1 for r in app_health_tests if r.get("status") == True)
+    
+    status = critical_issues == 0
+    severity = "critical" if critical_issues > 0 else "warning" if warnings > 0 else "info"
+    
+    output = (f"Tests: {passed_tests}/{total_tests} passed | "
+             f"Apps: {healthy_apps}/{total_apps} healthy, {synced_apps}/{total_apps} synced | "
+             f"Critical: {critical_issues} | Warnings: {warnings}")
+    
+    return create_test_result(
+        "overall_summary",
+        "Overall ArgoCD test summary",
+        status,
+        output,
+        severity
+    )
+
+
+# ------------------------------------------------------------
+# Main runner
+# ------------------------------------------------------------
+
+def test_argocd() -> List[Dict[str, Any]]:
+    """Main function to test ArgoCD"""
+    start_time = time.time()
+    results: List[Dict[str, Any]] = []
+    
+    # 1) ArgoCD deployment
+    results.extend(check_argocd_deployment())
+    
+    # 2) ArgoCD services
+    results.extend(check_argocd_services())
+    
+    # 3) Server health
+    results.extend(check_argocd_server_health())
+    
+    # 4) Applications
+    results.extend(check_applications())
+    
+    # 5) Logs
+    results.extend(check_application_logs(time_window_minutes=5))
+    
+    # 6) CLI access (optional)
+    results.extend(check_argocd_cli_access())
+    
+    # 7) Generate summary
+    summary = generate_summary(results)
+    results.append(summary)
+    
+    return results
+
+
+def print_results(results: List[Dict[str, Any]]):
+    """Pretty print test results"""
+    print("\n" + "="*80)
+    print(" "*30 + "ARGOCD TEST RESULTS")
+    print("="*80)
+    
+    # Group by severity
+    by_severity = defaultdict(list)
+    for r in results:
+        by_severity[r.get("severity", "info")].append(r)
+    
+    # Print critical issues
+    if by_severity["critical"]:
+        print("\n❌ CRITICAL ISSUES:")
+        for r in by_severity["critical"]:
+            if not r.get("status"):
+                print(f"  • {r['description']}: {r['output']}")
+    
+    # Print warnings
+    if by_severity["warning"]:
+        print("\n⚠️  WARNINGS:")
+        for r in by_severity["warning"]:
+            if not r.get("status"):
+                print(f"  • {r['description']}: {r['output']}")
+    
+    # Print successes summary
+    success_count = sum(1 for r in results if r.get("status"))
+    total_count = len(results)
+    print(f"\n✅ SUCCESSES: {success_count}/{total_count}")
+    
+    # Print overall summary
+    summary = next((r for r in results if r["name"] == "overall_summary"), None)
+    if summary:
+        print(f"\n📈 OVERALL SUMMARY:")
+        print(f"  {summary['output']}")
+    
+    print("="*80 + "\n")
+
+
+if __name__ == "__main__":
+    try:
+        # Run tests
+        results = test_argocd()
+        
+        # Output JSON (primary output)
+        print(json.dumps(results, indent=2))
+        
+        # Pretty print to stderr for human readability
+        if "--pretty" in sys.argv:
+            print_results(results)
+        
+        # Exit with error if critical issues
+        critical = sum(1 for r in results if not r.get("status") and r.get("severity") == "critical")
+        sys.exit(1 if critical > 0 else 0)
+        
+    except KeyboardInterrupt:
+        print(json.dumps([create_test_result(
+            "test_interrupted",
+            "Test execution",
+            False,
+            "Testing interrupted by user",
+            "critical"
+        )]))
+        sys.exit(1)
+    except Exception as e:
+        import traceback
+        print(json.dumps([create_test_result(
+            "test_error",
+            "Test execution",
+            False,
+            f"Fatal error: {str(e)}",
+            "critical"
+        )]))
+        if "--debug" in sys.argv:
+            traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
