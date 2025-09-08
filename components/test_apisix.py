@@ -328,13 +328,15 @@ def test_routes() -> List[Dict[str, Any]]:
     filtered_routes = []
     skipped_count = 0
     for route in routes:
-        if route['host'].startswith('agent.'):
+        route_host = route['host']
+        route_name = route['name']
+        if route_host.startswith('agent.'):
             skipped_count += 1
             results.append(create_test_result(
-                f"apisix_{route['name']}_skipped",
-                f"Skipped auth-protected route {route['name']} ({route['host']})",
+                f"apisix_{route_name}_skipped",
+                f"Skipped auth-protected route {route_name} ({route_host})",
                 True,
-                f"Route {route['host']} skipped (requires authentication)",
+                f"Route {route_host} skipped (requires authentication)",
                 "INFO"
             ))
         else:
@@ -756,6 +758,33 @@ def test_apisix() -> List[Dict[str, Any]]:
     results.extend(test_routes())
     
     return results
+
+# ------------------------------------------------------------
+# Framework Compatibility Functions
+# ------------------------------------------------------------
+
+def get_apisix_tests():
+    """
+    Framework compatibility function for stack_test_definitions.py
+    Returns a single test that runs the full APISIX test suite
+    """
+    return [{
+        'name': 'apisix_comprehensive_test',
+        'description': 'Run comprehensive APISIX tests',
+        'command': 'python3',
+        'args': [__file__],  # Run this same file
+        'timeout': 60,
+        'component': 'apisix',
+        'parse_json': True  # Tell framework to parse JSON output
+    }]
+
+def get_tests():
+    """Alias for framework compatibility"""
+    return get_apisix_tests()
+
+# ------------------------------------------------------------
+# Main entry point
+# ------------------------------------------------------------
 
 def main():
     """Main entry point - output JSON to stdout"""
