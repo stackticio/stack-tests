@@ -374,7 +374,8 @@ def test_loki_push_success() -> List[Dict]:
         if error_count > 20 and success_count < 5:
             status = False
             if error_details:
-                output = f"{error_count} Loki errors ({', '.join(set(error_details)[:2])})"
+                unique_errors = list(set(error_details))[:2]  # Convert set to list first
+                output = f"{error_count} Loki errors ({', '.join(unique_errors)})"
             else:
                 output = f"{error_count} Loki push errors detected"
         elif success_count > 0:
