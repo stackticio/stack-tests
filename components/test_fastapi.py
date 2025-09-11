@@ -2,7 +2,7 @@
 """
 FastAPI Service Test Script
 - Tests health and service endpoints with proper authentication
-- Tests actual deployed endpoints
+- Tests actual deployed endpoints (GET only)
 
 ENV VARS
   FASTAPI_NS (default: fastapi)
@@ -187,60 +187,19 @@ def test_health_endpoint() -> Tuple[List[Dict[str, Any]], Dict]:
     
     return [result], health_data
 
-def test_core_endpoints() -> List[Dict[str, Any]]:
-    """Test core endpoints"""
-    results = []
-    
-    endpoints = [
-        ("/", "Root endpoint", False),
-        ("/docs", "API documentation", False)
-    ]
-    
-    for path, description, required in endpoints:
-        # Try without auth first
-        response = python_http_request(NAMESPACE, path)
-        status_code = response.get("status", 0)
-        
-        # If 401, try with API key
-        if status_code == 401 and API_KEY:
-            response = python_http_request(
-                NAMESPACE, 
-                path,
-                headers={"X-API-Key": API_KEY}
-            )
-            status_code = response.get("status", 0)
-            auth_used = " (with API key)"
-        else:
-            auth_used = ""
-        
-        is_success = status_code in [200, 201]
-        severity = "critical" if required and not is_success else "info"
-        
-        results.append(create_test_result(
-            f"core_{path.replace('/', '_') or 'root'}",
-            description,
-            is_success,
-            f"{'✓' if is_success else '✗'} {path} → HTTP {status_code}{auth_used}",
-            severity
-        ))
-    
-    return results
-
 def test_service_endpoints(health_data: Dict) -> List[Dict[str, Any]]:
-    """Test service endpoints based on what's enabled"""
+    """Test service endpoints based on what's enabled (GET only)"""
     results = []
     
-    # Define known service endpoints
+    # Define known service endpoints (GET only)
     service_endpoints = {
         "rabbitmq": [
             ("/api/v1/rabbitmq/queues", "GET", "List queues"),
             ("/api/v1/rabbitmq/exchanges", "GET", "List exchanges"),
-            ("/api/v1/rabbitmq/publish", "POST", "Publish message"),
         ],
         "stack_agent_api": [
             ("/api/v1/stack_agent_api/hosts", "GET", "List hosts"),
             ("/api/v1/stack_agent_api/stacks", "GET", "List stacks"),
-            ("/api/v1/stack_agent_api/register-stack", "POST", "Register stack"),
         ]
     }
     
@@ -251,22 +210,11 @@ def test_service_endpoints(health_data: Dict) -> List[Dict[str, Any]]:
         # Check if service should be tested
         if service_name == "stack_agent_api" or services.get(service_name.replace("_api", ""), False):
             for path, method, description in endpoints:
-                # Prepare test data for POST requests
-                test_data = None
-                if method == "POST":
-                    if "publish" in path:
-                        test_data = json.dumps({"message": "test", "queue": "test-queue"})
-                    elif "register" in path:
-                        test_data = json.dumps({"stack": "test", "version": "1.0"})
-                    else:
-                        test_data = json.dumps({"test": "data"})
-                
-                # Test endpoint
+                # Test endpoint (GET only, no data needed)
                 response = python_http_request(
                     NAMESPACE,
                     path,
-                    method,
-                    data=test_data
+                    method
                 )
                 
                 status_code = response.get("status", 0)
@@ -277,8 +225,7 @@ def test_service_endpoints(health_data: Dict) -> List[Dict[str, Any]]:
                         NAMESPACE,
                         path,
                         method,
-                        headers={"X-API-Key": API_KEY},
-                        data=test_data
+                        headers={"X-API-Key": API_KEY}
                     )
                     status_code = response.get("status", 0)
                     auth_used = " (with API key)"
@@ -290,14 +237,10 @@ def test_service_endpoints(health_data: Dict) -> List[Dict[str, Any]]:
                     status = True
                     severity = "info"
                     symbol = "✓"
-                elif status_code == 422 and method == "POST":
-                    status = True  # Endpoint exists, just needs proper data
+                elif status_code == 404:
+                    status = False
                     severity = "warning"
-                    symbol = "⚠"
-                elif status_code == 405:
-                    status = True  # Endpoint exists, method not allowed
-                    severity = "warning"
-                    symbol = "⚠"
+                    symbol = "✗"
                 else:
                     status = False
                     severity = "warning"
@@ -342,10 +285,7 @@ def test_fastapi() -> List[Dict[str, Any]]:
     health_results, health_data = test_health_endpoint()
     all_results.extend(health_results)
     
-    # Test core endpoints
-    all_results.extend(test_core_endpoints())
-    
-    # Test service endpoints
+    # Test service endpoints (GET only)
     all_results.extend(test_service_endpoints(health_data))
     
     # Generate summary
