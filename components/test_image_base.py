@@ -22,20 +22,30 @@ def test_messages() -> List[Dict[str, Any]]:
     """Your messages here"""
     tests = []
     
-    # ADD YOUR MESSAGES HERE - They always pass (True)
+    # FIRST MESSAGE - Instructions
     tests.append(create_test_result(
-        "message_1",
-        "First message",
+        "instructions",
+        "Script customization instructions",
         True,
-        "Replace this with your message",
+        "Please customize your own script for your source code. Here is the basic structure explained below.",
         "INFO"
     ))
     
+    # SECOND MESSAGE - Structure explanation
     tests.append(create_test_result(
-        "message_2",
-        "Second message",
+        "structure",
+        "How this script is structured",
         True,
-        "Replace this with another message",
+        "STRUCTURE: 1) create_test_result() builds each message with name/description/status/output/severity. 2) test_messages() contains all your messages. 3) main() outputs everything as JSON. To customize: just modify the test_messages() function.",
+        "INFO"
+    ))
+    
+    # THIRD MESSAGE - How to use
+    tests.append(create_test_result(
+        "usage",
+        "How to modify this script",
+        True,
+        "TO CUSTOMIZE: Replace these messages with your own. Set status=True for pass, False for fail. Severity can be INFO/WARNING/CRITICAL. Each message needs: name (unique ID), description (short title), status (pass/fail), output (your actual message).",
         "INFO"
     ))
     
