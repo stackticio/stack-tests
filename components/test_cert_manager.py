@@ -1,5 +1,3 @@
-
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -20,7 +18,7 @@ import os
 NAMESPACE = "cert-manager"
 TEST_RESULTS = []
         
-def run_command(command: str, env: Dict = None, timeout: int = 10) -> Dict:
+def run_command(command: str, env: Dict = None, timeout: int = 10) -> tuple:
     """Helper to run a shell command and capture stdout/stderr/exit code"""
     try:
         completed = subprocess.run(
@@ -31,13 +29,10 @@ def run_command(command: str, env: Dict = None, timeout: int = 10) -> Dict:
             text=True,
             timeout=timeout
         )
-        return {
-            "stdout": completed.stdout.strip(),
-            "stderr": completed.stderr.strip(),
-            "exit_code": completed.returncode
-        }
+        # Return as tuple to match original usage
+        return (completed.stdout.strip(), completed.stderr.strip(), completed.returncode)
     except subprocess.TimeoutExpired:
-        return {"stdout": "", "stderr": "Timeout", "exit_code": 124}
+        return ("", "Timeout", 124)
 
 def test_certmanager_pods() -> List[Dict]:
     """Check if all cert-manager components are running"""
@@ -468,7 +463,7 @@ def test_certificates() -> List[Dict]:
     except Exception as e:
         return [{
             "name": name,
-            "status": passed,
+            "status": False,
             "output": f"Failed to check certificates: {str(e)}",
             "severity": "WARNING" 
         }]
@@ -867,7 +862,7 @@ def test_validating_webhook() -> List[Dict]:
         
         return [{
             "name": name,
-            "status": False,
+            "status": True,  # FIX: Changed from False to True
             "output": f"ValidatingWebhook configured: {', '.join(webhook_info)}",
             "severity": "INFO"
         }]
@@ -942,7 +937,7 @@ def test_api_resources() -> List[Dict]:
     except Exception as e:
         return [{
             "name": name,
-            "status": True,
+            "status": False,
             "output": f"Failed to check CRDs: {str(e)}",
             "severity": "WARNING"
         }]
