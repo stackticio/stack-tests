@@ -279,14 +279,14 @@ def test_fastapi() -> List[Dict[str, Any]]:
     all_results = []
     
     # Test deployment
-    all_results.extend(test_deployment())
+    all_results.extend(check_deployment())
     
     # Test health endpoint
-    health_results, health_data = test_health_endpoint()
+    health_results, health_data = check_health_endpoint()
     all_results.extend(health_results)
     
     # Test service endpoints (GET only)
-    all_results.extend(test_service_endpoints(health_data))
+    all_results.extend(check_service_endpoints(health_data))
     
     # Generate summary
     all_results.append(generate_summary(all_results))
