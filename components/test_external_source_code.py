@@ -90,4 +90,48 @@ def show_custom_messages() -> List[Dict[str, Any]]:
 # Main runner
 # ------------------------------------------------------------
 
-def run_messages() -> List[Dict[str, A
+def run_messages() -> List[Dict[str, Any]]:
+    """Run all message functions"""
+    start_time = time.time()
+    results = []
+    
+    # Add your message functions here
+    results.extend(show_welcome_message())
+    results.extend(show_system_info())
+    results.extend(show_custom_messages())
+    
+    # Execution time (also always passes)
+    execution_time = time.time() - start_time
+    results.append(create_message(
+        "execution_time",
+        "Script execution time",
+        f"Completed in {execution_time:.3f} seconds"
+    ))
+    
+    return results
+
+def main():
+    """Main entry point"""
+    try:
+        results = run_messages()
+        
+        # Output as JSON
+        print(json.dumps(results, indent=2))
+        
+        # Always exit successfully since these are just messages
+        sys.exit(0)
+            
+    except Exception as e:
+        # Even errors are shown as messages (but we still exit with 0)
+        error_result = [{
+            "name": "script_message",
+            "description": "Script message",
+            "status": True,
+            "output": f"Script encountered an issue: {str(e)}",
+            "severity": "info"
+        }]
+        print(json.dumps(error_result, indent=2))
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()
