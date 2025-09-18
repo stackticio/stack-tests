@@ -232,13 +232,13 @@ def test_minio_buckets() -> List[Dict]:
                 "severity": "CRITICAL"
             })
     
-    # Report on unconfigured buckets
+    # Report on unconfigured buckets - NOT AN ERROR
     unconfigured = [b for b in existing_buckets if b not in [c["name"] for c in configured_buckets]]
     if unconfigured:
         results.append({
-            "name": "minio_unconfigured_buckets",
-            "status": True,
-            "output": f"Additional buckets found: {', '.join(unconfigured)}",
+            "name": "minio_additional_buckets",
+            "status": True,  # Always True - additional buckets are not an error
+            "output": f"Additional buckets found (not in MINIO_BUCKETS env): {', '.join(unconfigured)}",
             "severity": "INFO"
         })
     
@@ -664,7 +664,7 @@ if __name__ == "__main__":
             categories["connectivity"].append(result)
         elif "health" in name or "pod" in name or "service" in name:
             categories["health"].append(result)
-        elif "bucket" in name:
+        elif "bucket" in name or "additional" in name:  # Added "additional" here
             categories["bucket"].append(result)
         elif "stats" in name or "statistics" in name:
             categories["stats"].append(result)
