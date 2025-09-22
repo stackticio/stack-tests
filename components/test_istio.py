@@ -90,18 +90,7 @@ def check_prerequisites() -> List[Dict[str, Any]]:
     """Check prerequisites and tools availability."""
     tests: List[Dict[str, Any]] = []
     
-    # Check kubectl
-    cmd = "kubectl version --client --short 2>/dev/null"
-    r = run_command(cmd, timeout=5)
-    tests.append(create_test_result(
-        "kubectl_check",
-        "Check kubectl availability",
-        ok(r),
-        "kubectl is available" if ok(r) else "kubectl is not available or not configured",
-        "CRITICAL" if not ok(r) else "INFO"
-    ))
-    
-    # Check istioctl
+    # Only check istioctl
     cmd = "istioctl version --short 2>/dev/null"
     r = run_command(cmd, timeout=5)
     tests.append(create_test_result(
@@ -235,6 +224,7 @@ def analyze_namespace_sidecars() -> List[Dict[str, Any]]:
     namespace_stats = {}
     total_pods_with_sidecars = 0
     total_pods_without_sidecars = 0
+    issues_found = False
     
     for ns in sorted(INJECTION_NAMESPACES):
         # Get all pods in namespace
@@ -280,39 +270,51 @@ def analyze_namespace_sidecars() -> List[Dict[str, Any]]:
                 
                 namespace_stats[ns] = ns_stats
                 
+                # Check if this namespace has issues
+                if ns_stats['without_sidecar'] > 0 or ns_stats['pending'] > 0 or ns_stats['failed'] > 0:
+                    issues_found = True
+                
             except json.JSONDecodeError:
                 namespace_stats[ns] = {'error': 'Failed to parse pod data'}
+                issues_found = True
     
-    # Format output for each namespace
-    for ns in sorted(namespace_stats.keys()):
-        stats = namespace_stats[ns]
-        output += f"\n📦 Namespace: {ns}\n"
-        output += "-" * 40 + "\n"
-        
-        if 'error' in stats:
-            output += f"  ❌ {stats['error']}\n"
-            continue
-        
-        output += f"  Total Pods: {stats['total_pods']}\n"
-        output += f"  ✅ With Sidecar: {stats['with_sidecar']}\n"
-        output += f"  ❌ Without Sidecar: {stats['without_sidecar']}\n"
-        
-        if stats['pending'] > 0:
-            output += f"  ⏳ Pending: {stats['pending']}\n"
-        if stats['failed'] > 0:
-            output += f"  ⚠️ Failed: {stats['failed']}\n"
-        
-        # Show injection rate
-        if stats['total_pods'] > 0:
-            injection_rate = (stats['with_sidecar'] / stats['total_pods']) * 100
-            output += f"  📊 Injection Rate: {injection_rate:.1f}%\n"
+    # Only show detailed output if there are issues
+    if issues_found:
+        for ns in sorted(namespace_stats.keys()):
+            stats = namespace_stats[ns]
             
-            if injection_rate < 100 and stats['pods_without_sidecar']:
-                output += f"  ⚠️ Pods without sidecars:\n"
-                for pod in stats['pods_without_sidecar'][:3]:
-                    output += f"     - {pod}\n"
-                if len(stats['pods_without_sidecar']) > 3:
-                    output += f"     ... and {len(stats['pods_without_sidecar'])-3} more\n"
+            if 'error' in stats:
+                output += f"\n📦 Namespace: {ns}\n"
+                output += "-" * 40 + "\n"
+                output += f"  ❌ {stats['error']}\n"
+                continue
+            
+            # Only show namespaces with issues
+            if stats['without_sidecar'] > 0 or stats['pending'] > 0 or stats['failed'] > 0:
+                output += f"\n📦 Namespace: {ns}\n"
+                output += "-" * 40 + "\n"
+                output += f"  Total Pods: {stats['total_pods']}\n"
+                output += f"  ✅ With Sidecar: {stats['with_sidecar']}\n"
+                
+                if stats['without_sidecar'] > 0:
+                    output += f"  ❌ Without Sidecar: {stats['without_sidecar']}\n"
+                
+                if stats['pending'] > 0:
+                    output += f"  ⏳ Pending: {stats['pending']}\n"
+                if stats['failed'] > 0:
+                    output += f"  ⚠️ Failed: {stats['failed']}\n"
+                
+                # Show injection rate
+                if stats['total_pods'] > 0:
+                    injection_rate = (stats['with_sidecar'] / stats['total_pods']) * 100
+                    output += f"  📊 Injection Rate: {injection_rate:.1f}%\n"
+                    
+                    if injection_rate < 100 and stats['pods_without_sidecar']:
+                        output += f"  ⚠️ Pods without sidecars:\n"
+                        for pod in stats['pods_without_sidecar'][:3]:
+                            output += f"     - {pod}\n"
+                        if len(stats['pods_without_sidecar']) > 3:
+                            output += f"     ... and {len(stats['pods_without_sidecar'])-3} more\n"
     
     # Summary
     output += "\n" + "=" * 50 + "\n"
@@ -371,13 +373,16 @@ def check_control_plane_health() -> List[Dict[str, Any]]:
     else:
         output += "❌ Istiod deployment not found\n"
     
-    # Check gateways
+    # Check gateways (only show if they exist)
     components = ["istio-ingressgateway", "istio-egressgateway"]
+    gateway_found = False
+    
     for component in components:
         cmd = f"kubectl get deployment -n {ISTIO_NAMESPACE} {component} -o json 2>/dev/null"
         r = run_command(cmd, timeout=10)
         
         if ok(r) and r['stdout']:
+            gateway_found = True
             try:
                 deployment = json.loads(r['stdout'])
                 replicas = deployment.get('spec', {}).get('replicas', 0)
@@ -389,10 +394,11 @@ def check_control_plane_health() -> List[Dict[str, Any]]:
                     output += f"⚠️ {component}: {ready}/{replicas} replicas ready\n"
             except json.JSONDecodeError:
                 pass
-        else:
-            output += f"ℹ️ {component}: Not deployed (optional)\n"
     
-    # Check control plane pods
+    if not gateway_found:
+        output += "ℹ️ No gateways deployed (optional components)\n"
+    
+    # Check control plane pods for issues
     cmd = f"kubectl get pods -n {ISTIO_NAMESPACE} -o json 2>/dev/null"
     r = run_command(cmd, timeout=10)
     
@@ -431,10 +437,6 @@ def analyze_data_plane_per_namespace() -> List[Dict[str, Any]]:
     """Analyze data plane health per namespace."""
     tests: List[Dict[str, Any]] = []
     
-    output = "=" * 50 + "\n"
-    output += "DATA PLANE ANALYSIS BY NAMESPACE\n"
-    output += "=" * 50 + "\n"
-    
     # Get proxy status for all namespaces
     cmd = "istioctl proxy-status 2>&1"
     r = run_command(cmd, timeout=30)
@@ -472,33 +474,48 @@ def analyze_data_plane_per_namespace() -> List[Dict[str, Any]]:
                         elif 'NOT SENT' in status:
                             proxy_status_by_ns[ns]['not_sent'] += 1
     
-    # Analyze each namespace
-    for ns in sorted(INJECTION_NAMESPACES):
-        output += f"\n📦 Namespace: {ns}\n"
-        output += "-" * 40 + "\n"
+    # Check if there are any issues
+    has_issues = any(
+        stats['stale'] > 0 or stats['not_sent'] > 0 
+        for stats in proxy_status_by_ns.values()
+    )
+    
+    if not proxy_status_by_ns:
+        output = "No proxy data available - check if sidecars are injected\n"
+    elif has_issues:
+        output = "=" * 50 + "\n"
+        output += "DATA PLANE ISSUES DETECTED\n"
+        output += "=" * 50 + "\n"
         
-        if ns in proxy_status_by_ns:
-            stats = proxy_status_by_ns[ns]
-            total_proxies = len(stats['proxies'])
-            
-            output += f"  Total Proxies: {total_proxies}\n"
-            output += f"  ✅ Synced: {stats['synced']}\n"
-            
-            if stats['stale'] > 0:
-                output += f"  ⚠️ Stale: {stats['stale']}\n"
-            if stats['not_sent'] > 0:
-                output += f"  ❌ Not Sent: {stats['not_sent']}\n"
-            
-            # Show problematic proxies
-            problematic = [p for p in stats['proxies'] if 'SYNCED' not in p['status']]
-            if problematic:
-                output += "  Problematic proxies:\n"
-                for proxy in problematic[:3]:
-                    output += f"    - {proxy['name']}: {proxy['status']}\n"
-                if len(problematic) > 3:
-                    output += f"    ... and {len(problematic)-3} more\n"
-        else:
-            output += "  No proxy data available\n"
+        # Only show namespaces with issues
+        for ns in sorted(INJECTION_NAMESPACES):
+            if ns in proxy_status_by_ns:
+                stats = proxy_status_by_ns[ns]
+                
+                # Only show if there are issues
+                if stats['stale'] > 0 or stats['not_sent'] > 0:
+                    total_proxies = len(stats['proxies'])
+                    
+                    output += f"\n📦 Namespace: {ns}\n"
+                    output += "-" * 40 + "\n"
+                    output += f"  Total Proxies: {total_proxies}\n"
+                    output += f"  ✅ Synced: {stats['synced']}\n"
+                    
+                    if stats['stale'] > 0:
+                        output += f"  ⚠️ Stale: {stats['stale']}\n"
+                    if stats['not_sent'] > 0:
+                        output += f"  ❌ Not Sent: {stats['not_sent']}\n"
+                    
+                    # Show problematic proxies
+                    problematic = [p for p in stats['proxies'] if 'SYNCED' not in p['status']]
+                    if problematic:
+                        output += "  Problematic proxies:\n"
+                        for proxy in problematic[:3]:
+                            output += f"    - {proxy['name']}: {proxy['status']}\n"
+                        if len(problematic) > 3:
+                            output += f"    ... and {len(problematic)-3} more\n"
+    else:
+        output = "✅ All data plane proxies are synced\n"
     
     # Determine overall health
     total_stale = sum(stats['stale'] for stats in proxy_status_by_ns.values())
@@ -511,8 +528,8 @@ def analyze_data_plane_per_namespace() -> List[Dict[str, Any]]:
         severity = "WARNING"
     
     tests.append(create_test_result(
-        "data_plane_per_namespace",
-        "Data plane proxy status by namespace",
+        "data_plane_analysis",
+        "Data plane proxy status",
         total_stale == 0 and total_not_sent == 0,
         output.rstrip(),
         severity
@@ -527,10 +544,6 @@ def analyze_data_plane_per_namespace() -> List[Dict[str, Any]]:
 def analyze_traffic_relationships() -> List[Dict[str, Any]]:
     """Analyze service-to-service traffic relationships."""
     tests: List[Dict[str, Any]] = []
-    
-    output = "=" * 50 + "\n"
-    output += "TRAFFIC FLOW ANALYSIS\n"
-    output += "=" * 50 + "\n"
     
     # Get VirtualServices
     cmd = "kubectl get virtualservices --all-namespaces -o json 2>/dev/null"
@@ -595,41 +608,53 @@ def analyze_traffic_relationships() -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             pass
     
-    # Output per namespace
-    for ns in sorted(INJECTION_NAMESPACES):
-        output += f"\n📦 Namespace: {ns}\n"
-        output += "-" * 40 + "\n"
-        
-        # Virtual Services
-        if ns in virtual_services_by_ns:
-            output += f"  Virtual Services: {len(virtual_services_by_ns[ns])}\n"
-            for vs in virtual_services_by_ns[ns][:3]:
-                output += f"    - {vs['name']} → {', '.join(vs['hosts'][:2])}\n"
-        else:
-            output += "  Virtual Services: 0\n"
-        
-        # Destination Rules
-        if ns in destination_rules_by_ns:
-            output += f"  Destination Rules: {len(destination_rules_by_ns[ns])}\n"
-            for dr in destination_rules_by_ns[ns][:3]:
-                output += f"    - {dr['name']} → {dr['host']}\n"
-        else:
-            output += "  Destination Rules: 0\n"
-        
-        # Traffic splitting rules
-        ns_traffic_rules = [r for r in traffic_rules if r['namespace'] == ns]
-        if ns_traffic_rules:
-            output += "  ⚡ Traffic Management:\n"
-            for rule in ns_traffic_rules[:2]:
-                output += f"    - {rule['vs']}: Split {rule['weights']} to {', '.join(rule['destinations'][:2])}\n"
+    # Check if any traffic configuration exists
+    total_vs = sum(len(vs) for vs in virtual_services_by_ns.values())
+    total_dr = sum(len(dr) for dr in destination_rules_by_ns.values())
     
-    # Summary
-    output += "\n" + "=" * 50 + "\n"
-    output += "TRAFFIC MANAGEMENT SUMMARY\n"
-    output += "-" * 40 + "\n"
-    output += f"Total VirtualServices: {sum(len(vs) for vs in virtual_services_by_ns.values())}\n"
-    output += f"Total DestinationRules: {sum(len(dr) for dr in destination_rules_by_ns.values())}\n"
-    output += f"Traffic Splitting Rules: {len(traffic_rules)}\n"
+    if total_vs == 0 and total_dr == 0:
+        output = "No VirtualServices or DestinationRules configured\n"
+    else:
+        output = "=" * 50 + "\n"
+        output += "TRAFFIC FLOW CONFIGURATION\n"
+        output += "=" * 50 + "\n"
+        
+        # Only show namespaces with traffic rules
+        for ns in sorted(set(list(virtual_services_by_ns.keys()) + list(destination_rules_by_ns.keys()))):
+            has_vs = ns in virtual_services_by_ns
+            has_dr = ns in destination_rules_by_ns
+            
+            if has_vs or has_dr:
+                output += f"\n📦 Namespace: {ns}\n"
+                output += "-" * 40 + "\n"
+                
+                # Virtual Services
+                if has_vs:
+                    output += f"  Virtual Services: {len(virtual_services_by_ns[ns])}\n"
+                    for vs in virtual_services_by_ns[ns][:3]:
+                        output += f"    - {vs['name']} → {', '.join(vs['hosts'][:2])}\n"
+                
+                # Destination Rules
+                if has_dr:
+                    output += f"  Destination Rules: {len(destination_rules_by_ns[ns])}\n"
+                    for dr in destination_rules_by_ns[ns][:3]:
+                        output += f"    - {dr['name']} → {dr['host']}\n"
+                
+                # Traffic splitting rules for this namespace
+                ns_traffic_rules = [r for r in traffic_rules if r['namespace'] == ns]
+                if ns_traffic_rules:
+                    output += "  ⚡ Traffic Management:\n"
+                    for rule in ns_traffic_rules[:2]:
+                        output += f"    - {rule['vs']}: Split {rule['weights']} to {', '.join(rule['destinations'][:2])}\n"
+        
+        # Summary
+        output += "\n" + "=" * 50 + "\n"
+        output += "SUMMARY\n"
+        output += "-" * 40 + "\n"
+        output += f"Total VirtualServices: {total_vs}\n"
+        output += f"Total DestinationRules: {total_dr}\n"
+        if traffic_rules:
+            output += f"Traffic Splitting Rules: {len(traffic_rules)}\n"
     
     tests.append(create_test_result(
         "traffic_flow_analysis",
@@ -648,10 +673,6 @@ def analyze_traffic_relationships() -> List[Dict[str, Any]]:
 def analyze_security_policies() -> List[Dict[str, Any]]:
     """Analyze security policies per namespace."""
     tests: List[Dict[str, Any]] = []
-    
-    output = "=" * 50 + "\n"
-    output += "SECURITY POLICY ANALYSIS\n"
-    output += "=" * 50 + "\n"
     
     # Get PeerAuthentications
     cmd = "kubectl get peerauthentications --all-namespaces -o json 2>/dev/null"
@@ -701,36 +722,44 @@ def analyze_security_policies() -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             pass
     
-    # Analyze per namespace
-    for ns in sorted(INJECTION_NAMESPACES):
-        output += f"\n📦 Namespace: {ns}\n"
-        output += "-" * 40 + "\n"
-        
-        # mTLS settings
-        if ns in peer_auth_by_ns:
-            output += f"  mTLS Policies: {len(peer_auth_by_ns[ns])}\n"
-            for pa in peer_auth_by_ns[ns]:
-                icon = "🔒" if pa['mtls_mode'] == 'STRICT' else "🔓"
-                output += f"    {icon} {pa['name']}: {pa['mtls_mode']}\n"
-        else:
-            output += "  mTLS Policies: None (using mesh default)\n"
-        
-        # Authorization policies
-        if ns in auth_policies_by_ns:
-            output += f"  Authorization Policies: {len(auth_policies_by_ns[ns])}\n"
-            for ap in auth_policies_by_ns[ns][:3]:
-                output += f"    - {ap['name']}: {ap['action']} ({ap['rules']} rules)\n"
-        else:
-            output += "  Authorization Policies: None\n"
-    
     # Check for security issues
     namespaces_without_strict_mtls = []
     for ns in INJECTION_NAMESPACES:
         if ns not in peer_auth_by_ns or not any(pa['mtls_mode'] == 'STRICT' for pa in peer_auth_by_ns.get(ns, [])):
             namespaces_without_strict_mtls.append(ns)
     
+    # Build output
+    if not peer_auth_by_ns and not auth_policies_by_ns:
+        output = "No security policies configured\n"
+    else:
+        output = "=" * 50 + "\n"
+        output += "SECURITY POLICY ANALYSIS\n"
+        output += "=" * 50 + "\n"
+        
+        # Only show namespaces with policies
+        for ns in sorted(set(list(peer_auth_by_ns.keys()) + list(auth_policies_by_ns.keys()))):
+            if ns in peer_auth_by_ns or ns in auth_policies_by_ns:
+                output += f"\n📦 Namespace: {ns}\n"
+                output += "-" * 40 + "\n"
+                
+                # mTLS settings
+                if ns in peer_auth_by_ns:
+                    output += f"  mTLS Policies: {len(peer_auth_by_ns[ns])}\n"
+                    for pa in peer_auth_by_ns[ns]:
+                        icon = "🔒" if pa['mtls_mode'] == 'STRICT' else "🔓"
+                        output += f"    {icon} {pa['name']}: {pa['mtls_mode']}\n"
+                
+                # Authorization policies
+                if ns in auth_policies_by_ns:
+                    output += f"  Authorization Policies: {len(auth_policies_by_ns[ns])}\n"
+                    for ap in auth_policies_by_ns[ns][:3]:
+                        output += f"    - {ap['name']}: {ap['action']} ({ap['rules']} rules)\n"
+    
+    # Add warning for namespaces without strict mTLS
     if namespaces_without_strict_mtls:
-        output += "\n⚠️ Namespaces without STRICT mTLS:\n"
+        if output and "No security policies" not in output:
+            output += "\n"
+        output += "⚠️ Namespaces without STRICT mTLS:\n"
         for ns in namespaces_without_strict_mtls:
             output += f"  - {ns}\n"
     
@@ -738,7 +767,7 @@ def analyze_security_policies() -> List[Dict[str, Any]]:
     
     tests.append(create_test_result(
         "security_policy_analysis",
-        "Security policies per namespace",
+        "Security policies analysis",
         len(namespaces_without_strict_mtls) == 0,
         output.rstrip(),
         severity
@@ -754,9 +783,8 @@ def analyze_envoy_health_metrics() -> List[Dict[str, Any]]:
     """Analyze Envoy health and performance metrics."""
     tests: List[Dict[str, Any]] = []
     
-    output = "=" * 50 + "\n"
-    output += "ENVOY HEALTH & PERFORMANCE\n"
-    output += "=" * 50 + "\n"
+    output = ""
+    issues_found = False
     
     # Sample envoys from each namespace
     envoy_health_by_ns = {}
@@ -789,6 +817,7 @@ def analyze_envoy_health_metrics() -> List[Dict[str, Any]]:
                     ns_health['healthy'] += 1
                 else:
                     ns_health['unhealthy'] += 1
+                    issues_found = True
             
             # Check for errors in stats
             cmd = f"kubectl exec -n {ns} {pod} -c istio-proxy -- curl -s localhost:15000/stats | grep -c 'failed\\|error\\|rejected' 2>/dev/null"
@@ -798,37 +827,20 @@ def analyze_envoy_health_metrics() -> List[Dict[str, Any]]:
                 error_count = int(r['stdout'])
                 if error_count > 100:
                     ns_health['errors'].append(f"{pod}: {error_count} errors")
+                    issues_found = True
         
-        if ns_health['healthy'] > 0 or ns_health['unhealthy'] > 0:
+        if ns_health['healthy'] > 0 or ns_health['unhealthy'] > 0 or ns_health['errors']:
             envoy_health_by_ns[ns] = ns_health
-    
-    # Output results
-    for ns in sorted(envoy_health_by_ns.keys()):
-        health = envoy_health_by_ns[ns]
-        output += f"\n📦 Namespace: {ns}\n"
-        output += "-" * 40 + "\n"
-        output += f"  Sampled Envoys:\n"
-        output += f"    ✅ Healthy: {health['healthy']}\n"
-        if health['unhealthy'] > 0:
-            output += f"    ❌ Unhealthy: {health['unhealthy']}\n"
-        
-        if health['errors']:
-            output += "  ⚠️ High error counts:\n"
-            for error in health['errors']:
-                output += f"    - {error}\n"
     
     # Check resource usage if metrics-server is available
     cmd = "kubectl top pods --all-namespaces --containers 2>/dev/null | grep istio-proxy | head -10"
     r = run_command(cmd, timeout=10)
     
+    high_cpu = []
+    high_memory = []
+    
     if ok(r) and r['stdout']:
-        output += "\n" + "=" * 50 + "\n"
-        output += "PROXY RESOURCE USAGE (Sample)\n"
-        output += "-" * 40 + "\n"
-        
         lines = r['stdout'].split('\n')
-        high_cpu = []
-        high_memory = []
         
         for line in lines:
             if line:
@@ -844,31 +856,57 @@ def analyze_envoy_health_metrics() -> List[Dict[str, Any]]:
                         cpu_value = int(cpu.replace('m', ''))
                         if cpu_value > 100:  # Over 100m CPU
                             high_cpu.append(f"{namespace}/{pod}: {cpu}")
+                            issues_found = True
                     
                     if 'Mi' in memory:
                         mem_value = int(memory.replace('Mi', ''))
                         if mem_value > 256:  # Over 256Mi memory
                             high_memory.append(f"{namespace}/{pod}: {memory}")
+                            issues_found = True
+    
+    # Only show output if there are issues or if explicitly requested
+    if issues_found:
+        output = "=" * 50 + "\n"
+        output += "ENVOY HEALTH & PERFORMANCE ISSUES\n"
+        output += "=" * 50 + "\n"
         
-        if high_cpu:
-            output += "  ⚠️ High CPU usage:\n"
-            for item in high_cpu[:3]:
-                output += f"    - {item}\n"
+        # Output health issues
+        for ns, health in sorted(envoy_health_by_ns.items()):
+            if health['unhealthy'] > 0 or health['errors']:
+                output += f"\n📦 Namespace: {ns}\n"
+                output += "-" * 40 + "\n"
+                
+                if health['unhealthy'] > 0:
+                    output += f"  ❌ Unhealthy Envoys: {health['unhealthy']}\n"
+                
+                if health['errors']:
+                    output += "  ⚠️ High error counts:\n"
+                    for error in health['errors']:
+                        output += f"    - {error}\n"
         
-        if high_memory:
-            output += "  ⚠️ High memory usage:\n"
-            for item in high_memory[:3]:
-                output += f"    - {item}\n"
-        
-        if not high_cpu and not high_memory:
-            output += "  ✅ All sampled proxies within normal resource limits\n"
+        # Output resource issues
+        if high_cpu or high_memory:
+            output += "\nRESOURCE USAGE ISSUES\n"
+            output += "-" * 40 + "\n"
+            
+            if high_cpu:
+                output += "  ⚠️ High CPU usage:\n"
+                for item in high_cpu[:3]:
+                    output += f"    - {item}\n"
+            
+            if high_memory:
+                output += "  ⚠️ High memory usage:\n"
+                for item in high_memory[:3]:
+                    output += f"    - {item}\n"
+    else:
+        output = "✅ All sampled Envoy proxies are healthy with normal resource usage\n"
     
     tests.append(create_test_result(
         "envoy_health_metrics",
         "Envoy health and performance analysis",
-        True,
+        not issues_found,
         output.rstrip(),
-        "INFO"
+        "WARNING" if issues_found else "INFO"
     ))
     
     return tests
@@ -881,24 +919,20 @@ def validate_istio_configuration() -> List[Dict[str, Any]]:
     """Validate Istio configuration for errors."""
     tests: List[Dict[str, Any]] = []
     
-    output = "=" * 50 + "\n"
-    output += "CONFIGURATION VALIDATION\n"
-    output += "=" * 50 + "\n"
-    
     # Run istioctl analyze
     cmd = "istioctl analyze --all-namespaces 2>&1"
     r = run_command(cmd, timeout=30)
     
     errors_by_ns = {}
     warnings_by_ns = {}
-    info_by_ns = {}
     
     if ok(r) and r['stdout']:
         lines = r['stdout'].split('\n')
         
         if 'No validation issues found' in r['stdout']:
-            output += "✅ No configuration issues found\n"
+            output = "✅ No configuration issues found\n"
         else:
+            # Parse errors and warnings
             for line in lines:
                 # Try to extract namespace from the line
                 ns_match = None
@@ -916,38 +950,44 @@ def validate_istio_configuration() -> List[Dict[str, Any]]:
                         if ns_match not in warnings_by_ns:
                             warnings_by_ns[ns_match] = []
                         warnings_by_ns[ns_match].append(line[:150])
-                    elif 'Info' in line or 'INFO' in line:
-                        if ns_match not in info_by_ns:
-                            info_by_ns[ns_match] = []
-                        info_by_ns[ns_match].append(line[:150])
-    
-    # Output issues by namespace
-    if errors_by_ns or warnings_by_ns:
-        for ns in sorted(set(list(errors_by_ns.keys()) + list(warnings_by_ns.keys()))):
-            output += f"\n📦 Namespace: {ns}\n"
-            output += "-" * 40 + "\n"
             
-            if ns in errors_by_ns:
-                output += f"  ❌ Errors: {len(errors_by_ns[ns])}\n"
-                for error in errors_by_ns[ns][:2]:
-                    output += f"    - {error}\n"
-            
-            if ns in warnings_by_ns:
-                output += f"  ⚠️ Warnings: {len(warnings_by_ns[ns])}\n"
-                for warning in warnings_by_ns[ns][:2]:
-                    output += f"    - {warning}\n"
+            # Build output only if issues exist
+            if errors_by_ns or warnings_by_ns:
+                output = "=" * 50 + "\n"
+                output += "CONFIGURATION ISSUES DETECTED\n"
+                output += "=" * 50 + "\n"
+                
+                for ns in sorted(set(list(errors_by_ns.keys()) + list(warnings_by_ns.keys()))):
+                    output += f"\n📦 Namespace: {ns}\n"
+                    output += "-" * 40 + "\n"
+                    
+                    if ns in errors_by_ns:
+                        output += f"  ❌ Errors: {len(errors_by_ns[ns])}\n"
+                        for error in errors_by_ns[ns][:2]:
+                            output += f"    - {error}\n"
+                    
+                    if ns in warnings_by_ns:
+                        output += f"  ⚠️ Warnings: {len(warnings_by_ns[ns])}\n"
+                        for warning in warnings_by_ns[ns][:2]:
+                            output += f"    - {warning}\n"
+                
+                # Summary
+                total_errors = sum(len(e) for e in errors_by_ns.values())
+                total_warnings = sum(len(w) for w in warnings_by_ns.values())
+                
+                output += "\n" + "=" * 50 + "\n"
+                output += "SUMMARY\n"
+                output += "-" * 40 + "\n"
+                output += f"Total Errors: {total_errors}\n"
+                output += f"Total Warnings: {total_warnings}\n"
+            else:
+                output = "✅ No configuration issues found\n"
+    else:
+        output = "⚠️ Unable to validate configuration\n"
     
-    # Summary
+    # Determine severity
     total_errors = sum(len(e) for e in errors_by_ns.values())
-    total_warnings = sum(len(w) for w in warnings_by_ns.values())
-    
-    output += "\n" + "=" * 50 + "\n"
-    output += "VALIDATION SUMMARY\n"
-    output += "-" * 40 + "\n"
-    output += f"Total Errors: {total_errors}\n"
-    output += f"Total Warnings: {total_warnings}\n"
-    
-    severity = "CRITICAL" if total_errors > 0 else ("WARNING" if total_warnings > 0 else "INFO")
+    severity = "CRITICAL" if total_errors > 0 else ("WARNING" if warnings_by_ns else "INFO")
     
     tests.append(create_test_result(
         "configuration_validation",
@@ -966,10 +1006,6 @@ def validate_istio_configuration() -> List[Dict[str, Any]]:
 def check_circuit_breakers_and_resilience() -> List[Dict[str, Any]]:
     """Check circuit breakers and resilience patterns."""
     tests: List[Dict[str, Any]] = []
-    
-    output = "=" * 50 + "\n"
-    output += "RESILIENCE PATTERNS\n"
-    output += "=" * 50 + "\n"
     
     # Get DestinationRules for circuit breaker analysis
     cmd = "kubectl get destinationrules --all-namespaces -o json 2>/dev/null"
@@ -1018,11 +1054,18 @@ def check_circuit_breakers_and_resilience() -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             pass
     
-    # Output per namespace
-    for ns in sorted(INJECTION_NAMESPACES):
-        has_config = ns in circuit_breakers_by_ns or ns in outlier_detection_by_ns
+    # Build output
+    total_cbs = sum(len(cb) for cb in circuit_breakers_by_ns.values())
+    total_ods = sum(len(od) for od in outlier_detection_by_ns.values())
+    
+    if total_cbs == 0 and total_ods == 0:
+        output = "⚠️ No resilience patterns configured - consider adding circuit breakers\n"
+    else:
+        output = "=" * 50 + "\n"
+        output += "RESILIENCE PATTERNS\n"
+        output += "=" * 50 + "\n"
         
-        if has_config:
+        for ns in sorted(set(list(circuit_breakers_by_ns.keys()) + list(outlier_detection_by_ns.keys()))):
             output += f"\n📦 Namespace: {ns}\n"
             output += "-" * 40 + "\n"
             
@@ -1035,24 +1078,17 @@ def check_circuit_breakers_and_resilience() -> List[Dict[str, Any]]:
                 output += f"  Outlier Detection: {len(outlier_detection_by_ns[ns])}\n"
                 for od in outlier_detection_by_ns[ns][:2]:
                     output += f"    - {od['name']}: errors={od['consecutive_errors']}, ejection={od['ejection_time']}\n"
-    
-    # Summary
-    total_cbs = sum(len(cb) for cb in circuit_breakers_by_ns.values())
-    total_ods = sum(len(od) for od in outlier_detection_by_ns.values())
-    
-    output += "\n" + "=" * 50 + "\n"
-    output += "RESILIENCE SUMMARY\n"
-    output += "-" * 40 + "\n"
-    output += f"Total Circuit Breakers: {total_cbs}\n"
-    output += f"Total Outlier Detection Policies: {total_ods}\n"
-    
-    if total_cbs == 0 and total_ods == 0:
-        output += "\n⚠️ No resilience patterns configured - consider adding circuit breakers\n"
+        
+        output += "\n" + "=" * 50 + "\n"
+        output += "SUMMARY\n"
+        output += "-" * 40 + "\n"
+        output += f"Total Circuit Breakers: {total_cbs}\n"
+        output += f"Total Outlier Detection Policies: {total_ods}\n"
     
     tests.append(create_test_result(
         "resilience_patterns",
         "Circuit breakers and outlier detection",
-        True,
+        total_cbs > 0 or total_ods > 0,
         output.rstrip(),
         "WARNING" if total_cbs == 0 and total_ods == 0 else "INFO"
     ))
@@ -1062,10 +1098,6 @@ def check_circuit_breakers_and_resilience() -> List[Dict[str, Any]]:
 def check_observability_stack() -> List[Dict[str, Any]]:
     """Check observability and telemetry components."""
     tests: List[Dict[str, Any]] = []
-    
-    output = "=" * 50 + "\n"
-    output += "OBSERVABILITY STACK\n"
-    output += "=" * 50 + "\n"
     
     # Check for common observability components
     components = {
@@ -1091,13 +1123,6 @@ def check_observability_stack() -> List[Dict[str, Any]]:
                     found_components[component_name] = f"{namespace}/{deployment}"
                     break
     
-    if found_components:
-        output += "Detected Components:\n"
-        for component, location in found_components.items():
-            output += f"  ✅ {component.capitalize()}: {location}\n"
-    else:
-        output += "⚠️ No standard observability components detected\n"
-    
     # Check Telemetry configuration
     cmd = "kubectl get telemetry --all-namespaces -o json 2>/dev/null"
     r = run_command(cmd, timeout=10)
@@ -1113,10 +1138,23 @@ def check_observability_stack() -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             pass
     
-    if telemetry_configs:
-        output += f"\nTelemetry Configurations: {len(telemetry_configs)}\n"
-        for config in telemetry_configs[:3]:
-            output += f"  - {config}\n"
+    # Build output
+    if found_components or telemetry_configs:
+        output = "=" * 50 + "\n"
+        output += "OBSERVABILITY STACK\n"
+        output += "=" * 50 + "\n"
+        
+        if found_components:
+            output += "Detected Components:\n"
+            for component, location in sorted(found_components.items()):
+                output += f"  ✅ {component.capitalize()}: {location}\n"
+        
+        if telemetry_configs:
+            output += f"\nTelemetry Configurations: {len(telemetry_configs)}\n"
+            for config in telemetry_configs[:3]:
+                output += f"  - {config}\n"
+    else:
+        output = "⚠️ No observability components detected\n"
     
     tests.append(create_test_result(
         "observability_stack",
@@ -1154,8 +1192,8 @@ def test_istio() -> List[Dict[str, Any]]:
         # 3. Control Plane
         ("Control Plane Health", check_control_plane_health),
         
-        # 4. Data Plane (Per-Namespace)
-        ("Data Plane by Namespace", analyze_data_plane_per_namespace),
+        # 4. Data Plane 
+        ("Data Plane Analysis", analyze_data_plane_per_namespace),
         
         # 5. Traffic Management
         ("Traffic Flow Analysis", analyze_traffic_relationships),
