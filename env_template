@@ -1,0 +1,310 @@
+{%- if cookiecutter.component.attributes.get('configmap') -%}
+{{ cookiecutter.component.attributes.configmap }}
+{%- endif %}
+
+{%- if cookiecutter.component.attributes.get('api_key') %}
+API_KEY={{ cookiecutter.component.attributes.api_key }}
+{%- endif %}
+
+{%- if cookiecutter.component.attributes.get('login') %}
+DOC_LOGIN={{ cookiecutter.component.attributes.login }}
+{%- endif %}
+
+{%- set postgres_dbs = [] -%}
+{%- set cnpg_dbs = [] -%}
+{%- set mongodb_dbs = [] -%}
+{%- set minio_buckets = [] -%}
+{%- set rabbitmq_exchanges = [] -%}
+{%- set rabbitmq_queues = [] -%}
+{%- set kafka_topics = [] -%}
+{%- set fastapi_components = [] -%}
+
+{%- for comp_name, comp in cookiecutter.components.items() -%}
+{%- if comp.type == "fastapi" -%}
+{%- set _ = fastapi_components.append({'name': comp_name, 'comp': comp}) -%}
+{%- elif comp.type == "postgresql" and comp.get('sub_components') -%}
+{%- for sub_name, sub in comp.sub_components.items() -%}
+{%- if sub.type == "database" or sub.type == "db" -%}
+{%- set _ = postgres_dbs.append({'db': sub, 'parent': comp, 'name': sub_name}) -%}
+{%- endif -%}
+{%- endfor -%}
+{%- elif comp.type == "cnpg" and comp.get('sub_components') -%}
+{%- for sub_name, sub in comp.sub_components.items() -%}
+{%- if sub.type == "db" -%}
+{%- set _ = cnpg_dbs.append({'db': sub, 'parent': comp, 'name': sub_name}) -%}
+{%- endif -%}
+{%- endfor -%}
+{%- elif comp.type == "mongodb" and comp.get('sub_components') -%}
+{%- for sub_name, sub in comp.sub_components.items() -%}
+{%- if sub.type == "mongo_db" or sub.type == "mongodb" or sub.type == "db" -%}
+{%- if "shard" not in sub_name.lower() -%}
+{%- set _ = mongodb_dbs.append({'db': sub, 'parent': comp, 'name': sub_name}) -%}
+{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+{%- elif comp.type == "minio" and comp.get('sub_components') -%}
+{%- for sub_name, sub in comp.sub_components.items() -%}
+{%- if sub.type == "bucket" or sub_name == "models" -%}
+{%- set _ = minio_buckets.append({'bucket': sub, 'parent': comp, 'name': sub_name}) -%}
+{%- endif -%}
+{%- endfor -%}
+{%- elif comp.type == "rabbitmq" and comp.get('sub_components') -%}
+{%- for sub_name, sub in comp.sub_components.items() -%}
+{%- if sub.type == "exchange" -%}
+{%- set _ = rabbitmq_exchanges.append({'exchange': sub, 'parent': comp, 'name': sub_name}) -%}
+{%- elif sub.type == "queue" -%}
+{%- set _ = rabbitmq_queues.append({'queue': sub, 'parent': comp, 'name': sub_name}) -%}
+{%- endif -%}
+{%- endfor -%}
+{%- elif comp.type == "kafka" and comp.get('sub_components') -%}
+{%- for sub_name, sub in comp.sub_components.items() -%}
+{%- if sub.type == "topic" -%}
+{%- set _ = kafka_topics.append({'topic': sub, 'parent': comp, 'name': sub_name}) -%}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{%- endfor -%}
+
+# ===== FASTAPI COMPONENTS =====
+{%- for fastapi_item in fastapi_components %}
+
+# FastAPI Service - {{ fastapi_item.name }}
+FASTAPI_{{ fastapi_item.name | upper }}_HOST={{ fastapi_item.name }}.{{ fastapi_item.comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+{%- if fastapi_item.comp.attributes.get('port') %}
+FASTAPI_{{ fastapi_item.name | upper }}_PORT={{ fastapi_item.comp.attributes.port }}
+{%- endif %}
+{%- if fastapi_item.comp.attributes.get('login') %}
+FASTAPI_{{ fastapi_item.name | upper }}_LOGIN={{ fastapi_item.comp.attributes.login }}
+{%- endif %}
+{%- if fastapi_item.comp.attributes.get('api_key') %}
+FASTAPI_{{ fastapi_item.name | upper }}_API_KEY={{ fastapi_item.comp.attributes.api_key }}
+{%- endif %}
+
+{#- Build FastAPI links/connections #}
+{%- set fastapi_links = [] -%}
+{%- if fastapi_item.comp.get('links_to') -%}
+{%- for link_name, link in fastapi_item.comp.links_to.items() -%}
+{%- set auth_type = link.attributes.get('auth_type', 'none') -%}
+{%- set needs_api_key = 'true' if auth_type != 'none' else 'false' -%}
+{%- set link_type = link.component.type if link.get('component') else link_name -%}
+{%- set _ = fastapi_links.append(link_name + ':' + link_type + ':api_key=' + needs_api_key) -%}
+{%- endfor -%}
+{%- endif -%}
+{%- if fastapi_links %}
+FASTAPI_{{ fastapi_item.name | upper }}_LINKS={{ fastapi_links | join(',') }}
+{%- endif %}
+{%- endfor %}
+
+# ===== COMPONENT CONNECTION INFO =====
+{%- for comp_name, comp in cookiecutter.components.items() %}
+{%- if comp.type == "postgresql" %}
+
+# PostgreSQL - {{ comp.name }}
+POSTGRESQL_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+{%- if comp.attributes.get('port') %}
+POSTGRESQL_{{ comp.name | upper }}_PORT={{ comp.attributes.port }}
+{%- endif %}
+{%- if comp.attributes.get('admin_password') %}
+POSTGRESQL_{{ comp.name | upper }}_ADMIN_PASSWORD={{ comp.attributes.admin_password }}
+{%- endif %}
+{%- elif comp.type == "cnpg" %}
+
+# CloudNativePG - {{ comp.name }}
+CNPG_{{ comp.name | upper }}_HOST={{ comp.name }}-rw.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+{%- if comp.attributes.get('port') %}
+CNPG_{{ comp.name | upper }}_PORT={{ comp.attributes.port }}
+{%- endif %}
+{%- if comp.attributes.get('admin_password') %}
+CNPG_{{ comp.name | upper }}_ADMIN_PASSWORD={{ comp.attributes.admin_password }}
+{%- endif %}
+{%- elif comp.type == "mongodb" %}
+
+# MongoDB - {{ comp.name }}
+MONGODB_{{ comp.name | upper }}_HOST={{ comp.name }}-mongos.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+{%- if comp.attributes.get('port') %}
+MONGODB_{{ comp.name | upper }}_PORT={{ comp.attributes.port }}
+{%- endif %}
+{%- if comp.attributes.get('cluster_admin_password') %}
+MONGODB_{{ comp.name | upper }}_CLUSTER_ADMIN_PASSWORD={{ comp.attributes.cluster_admin_password }}
+{%- endif %}
+{%- if comp.attributes.get('database_admin_password') %}
+MONGODB_{{ comp.name | upper }}_DATABASE_ADMIN_PASSWORD={{ comp.attributes.database_admin_password }}
+{%- endif %}
+{%- elif comp.type == "rabbitmq" %}
+
+# RabbitMQ - {{ comp.name }}
+RABBITMQ_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+{%- if comp.attributes.get('port') %}
+RABBITMQ_{{ comp.name | upper }}_PORT={{ comp.attributes.port }}
+{%- endif %}
+{%- if comp.attributes.get('username') %}
+RABBITMQ_{{ comp.name | upper }}_USER={{ comp.attributes.username }}
+{%- endif %}
+{%- if comp.attributes.get('password') %}
+RABBITMQ_{{ comp.name | upper }}_PASSWORD={{ comp.attributes.password }}
+{%- endif %}
+{%- if comp.attributes.get('admin_password') %}
+RABBITMQ_{{ comp.name | upper }}_ADMIN_PASSWORD={{ comp.attributes.admin_password }}
+{%- endif %}
+{%- if comp.attributes.get('vhost') %}
+RABBITMQ_{{ comp.name | upper }}_VHOST={{ comp.attributes.vhost }}
+{%- endif %}
+{%- elif comp.type == "kafka" %}
+
+# Kafka - {{ comp.name }}
+KAFKA_{{ comp.name | upper }}_BOOTSTRAP_SERVERS={{ comp.name }}-kafka-bootstrap.{{ comp.attributes.get('namespace', 'strimzi') }}.svc.cluster.local:9092
+{%- elif comp.type == "minio" %}
+
+# MinIO - {{ comp.name }}
+MINIO_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+{%- if comp.attributes.get('port') %}
+MINIO_{{ comp.name | upper }}_PORT={{ comp.attributes.port }}
+{%- endif %}
+{%- if comp.attributes.get('access_key') %}
+MINIO_{{ comp.name | upper }}_ACCESS_KEY={{ comp.attributes.access_key }}
+{%- endif %}
+{%- if comp.attributes.get('secret_key') %}
+MINIO_{{ comp.name | upper }}_SECRET_KEY={{ comp.attributes.secret_key }}
+{%- endif %}
+{%- elif comp.type == "airflow" %}
+
+# Airflow - {{ comp.name }}
+AIRFLOW_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+{%- if comp.attributes.get('service_port') %}
+AIRFLOW_{{ comp.name | upper }}_PORT={{ comp.attributes.service_port }}
+{%- endif %}
+{%- if comp.attributes.get('username') %}
+AIRFLOW_{{ comp.name | upper }}_USER={{ comp.attributes.username }}
+{%- endif %}
+{%- if comp.attributes.get('password') %}
+AIRFLOW_{{ comp.name | upper }}_PASSWORD={{ comp.attributes.password }}
+{%- endif %}
+{%- elif comp.type == "grafana" %}
+
+# Grafana - {{ comp.name }}
+GRAFANA_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+GRAFANA_{{ comp.name | upper }}_PORT=3000
+{%- if comp.attributes.get('admin_password') %}
+GRAFANA_{{ comp.name | upper }}_ADMIN_PASSWORD={{ comp.attributes.admin_password }}
+{%- endif %}
+{%- elif comp.type == "prometheus" %}
+
+# Prometheus - {{ comp.name }}
+PROMETHEUS_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+PROMETHEUS_{{ comp.name | upper }}_PORT=9090
+{%- elif comp.type == "loki" %}
+
+# Loki - {{ comp.name }}
+LOKI_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+LOKI_{{ comp.name | upper }}_PORT=3100
+{%- elif comp.type == "keycloak" %}
+
+# Keycloak - {{ comp.name }}
+KEYCLOAK_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+KEYCLOAK_{{ comp.name | upper }}_PORT=8080
+{%- if comp.attributes.get('admin_password') %}
+KEYCLOAK_{{ comp.name | upper }}_ADMIN_PASSWORD={{ comp.attributes.admin_password }}
+{%- endif %}
+{%- elif comp.type == "apisix" %}
+
+# APISIX Gateway - {{ comp.name }}
+APISIX_{{ comp.name | upper }}_HOST=apisix-gateway.{{ comp.attributes.get('namespace', 'ingress-apisix') }}.svc.cluster.local
+APISIX_{{ comp.name | upper }}_PORT=80
+APISIX_{{ comp.name | upper }}_ADMIN_HOST=apisix-admin.{{ comp.attributes.get('namespace', 'ingress-apisix') }}.svc.cluster.local
+APISIX_{{ comp.name | upper }}_ADMIN_PORT=9180
+{%- elif comp.type == "opensearch" %}
+
+# OpenSearch - {{ comp.name }}
+OPENSEARCH_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+OPENSEARCH_{{ comp.name | upper }}_PORT=9200
+{%- if comp.attributes.get('admin_password') %}
+OPENSEARCH_{{ comp.name | upper }}_ADMIN_PASSWORD={{ comp.attributes.admin_password }}
+{%- endif %}
+{%- elif comp.type == "opa" %}
+
+# OPA (Open Policy Agent) - {{ comp.name }}
+OPA_{{ comp.name | upper }}_HOST={{ comp.name }}.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+OPA_{{ comp.name | upper }}_PORT=8181
+{%- if comp.attributes.get('namespace') %}
+OPA_{{ comp.name | upper }}_NAMESPACE={{ comp.attributes.namespace }}
+{%- endif %}
+{%- elif comp.type == "argo-cd" %}
+
+# Argo CD - {{ comp.name }}
+ARGOCD_{{ comp.name | upper }}_HOST={{ comp.name }}-server.{{ comp.attributes.get('namespace', 'default') }}.svc.cluster.local
+ARGOCD_{{ comp.name | upper }}_PORT=80
+ARGOCD_{{ comp.name | upper }}_GRPC_PORT=443
+{%- if comp.attributes.get('namespace') %}
+ARGOCD_{{ comp.name | upper }}_NAMESPACE={{ comp.attributes.namespace }}
+{%- endif %}
+{%- if comp.attributes.get('admin_password') %}
+ARGOCD_{{ comp.name | upper }}_ADMIN_PASSWORD={{ comp.attributes.admin_password }}
+{%- endif %}
+{%- endif %}
+{%- endfor %}
+
+# ===== DATABASE CONNECTIONS =====
+{%- if postgres_dbs %}
+# PostgreSQL connection
+POSTGRES_HOST={{ postgres_dbs[0].parent.name }}.{{ postgres_dbs[0].parent.attributes.get('namespace', 'default') }}.svc.cluster.local
+POSTGRES_PORT=5432
+# PostgreSQL databases
+POSTGRES_DATABASES={% for item in postgres_dbs %}{{ item.name }}:{{ item.db.attributes.get('username', '') }}:{{ item.db.attributes.get('password', '') }}:{{ item.db.attributes.get('database', '') }}{% if not loop.last %};{% endif %}{% endfor %}
+{%- endif %}
+{%- if cnpg_dbs %}
+
+# CNPG connection
+CNPG_HOST={{ cnpg_dbs[0].parent.name }}-rw.{{ cnpg_dbs[0].parent.attributes.get('namespace', 'default') }}.svc.cluster.local
+CNPG_PORT=5432
+# CNPG databases
+CNPG_DATABASES={% for item in cnpg_dbs %}{{ item.name }}:{{ item.db.attributes.get('username', '') }}:{{ item.db.attributes.get('password', '') }}:{{ item.db.attributes.get('database', '') }}{% if not loop.last %};{% endif %}{% endfor %}
+{%- endif %}
+{%- if mongodb_dbs %}
+
+# MongoDB connection
+MONGODB_HOST={{ mongodb_dbs[0].parent.name }}-mongos.{{ mongodb_dbs[0].parent.attributes.get('namespace', 'default') }}.svc.cluster.local
+MONGODB_PORT=27017
+# MongoDB databases
+MONGODB_DATABASES={% for item in mongodb_dbs %}{{ item.name }}:{{ item.db.attributes.get('username', '') }}:{{ item.db.attributes.get('password', '') }}:{{ item.db.attributes.get('database', '') }}:{{ item.db.attributes.get('collector_name', '') }}{% if not loop.last %};{% endif %}{% endfor %}
+{%- endif %}
+{%- if minio_buckets %}
+
+# MinIO connection
+MINIO_HOST={{ minio_buckets[0].parent.name }}.{{ minio_buckets[0].parent.attributes.get('namespace', 'default') }}.svc.cluster.local
+MINIO_PORT=9000
+# MinIO buckets
+MINIO_BUCKETS={% for item in minio_buckets %}{{ item.name }}:{{ item.bucket.attributes.get('bucket', '') }}:{{ item.bucket.attributes.get('access_key', '') }}:{{ item.bucket.attributes.get('secret_key', '') }}{% if not loop.last %};{% endif %}{% endfor %}
+{%- endif %}
+{%- if rabbitmq_exchanges or rabbitmq_queues %}
+{%- set rabbitmq_parent = rabbitmq_exchanges[0].parent if rabbitmq_exchanges else rabbitmq_queues[0].parent %}
+
+# RabbitMQ connection
+RABBITMQ_HOST={{ rabbitmq_parent.name }}.{{ rabbitmq_parent.attributes.get('namespace', 'default') }}.svc.cluster.local
+RABBITMQ_PORT=5672
+{%- if rabbitmq_parent.attributes.get('username') %}
+RABBITMQ_USER={{ rabbitmq_parent.attributes.username }}
+{%- endif %}
+{%- if rabbitmq_parent.attributes.get('password') %}
+RABBITMQ_PASSWORD={{ rabbitmq_parent.attributes.password }}
+{%- endif %}
+{%- if rabbitmq_parent.attributes.get('vhost') %}
+RABBITMQ_VHOST={{ rabbitmq_parent.attributes.vhost }}
+{%- endif %}
+{%- endif %}
+{%- if rabbitmq_exchanges %}
+
+# RabbitMQ exchanges
+RABBITMQ_EXCHANGES={% for item in rabbitmq_exchanges %}{{ item.name }}{% if not loop.last %},{% endif %}{% endfor %}
+{%- endif %}
+{%- if rabbitmq_queues %}
+
+# RabbitMQ queues  
+RABBITMQ_QUEUES={% for item in rabbitmq_queues %}{{ item.name }}{% if not loop.last %},{% endif %}{% endfor %}
+{%- endif %}
+{%- if kafka_topics %}
+
+# Kafka connection
+KAFKA_BOOTSTRAP_SERVERS={{ kafka_topics[0].parent.name }}-kafka-bootstrap.{{ kafka_topics[0].parent.attributes.get('namespace', 'strimzi') }}.svc.cluster.local:9092
+# Kafka topics
+KAFKA_TOPICS={% for item in kafka_topics %}{{ item.name }}{% if not loop.last %},{% endif %}{% endfor %}
+{%- endif %}
