@@ -1,35 +1,75 @@
-# Test Script API Documentation
+# Testing Script Development Guide
 
 ## Overview
 
-This document describes the standardized structure for creating test scripts that integrate with our infrastructure testing API. All test scripts follow a consistent pattern to ensure compatibility and maintainability.
+This guide explains how to write test scripts that integrate with our testing API. All test scripts must follow a standardized JSON output format.
 
-## Core Structure
+## Basic Structure Requirements
 
-### 1. Basic Function Pattern
+### 1. JSON Output Format
 
-Every test function must follow this exact pattern:
+Each test result must be a JSON object with these exact fields:
 
-```python
-def test_component_name() -> List[Dict]:
-    """Brief description of what this test does"""
-    # Test implementation
-    return [{
-        "name": "unique_test_identifier",
-        "description": "Full description of what this test validates",
-        "passed": True/False,  # Boolean result
-        "output": "Human-readable detailed output string",
-        "severity": "LOW/WARNING/CRITICAL"  # Impact level
-    }]
+```json
+{
+  "name": "unique_test_identifier",
+  "description": "Human-readable test description",
+  "status": true,
+  "output": "Detailed test results or error message",
+  "severity": "INFO"
+}
 ```
 
-### 2. Helper Function
+#### Field Requirements
 
-All scripts must include this exact helper function:
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Unique identifier (lowercase with underscores) |
+| `description` | string | No | Human-readable test description |
+| `status` | boolean | Yes | `true` for pass, `false` for fail |
+| `output` | string | Yes | Detailed test results or error message |
+| `severity` | string | Yes | One of: `INFO`, `WARNING`, `CRITICAL` |
+
+### 2. Script Output
+
+Your script must output a **JSON array** to stdout:
 
 ```python
-def run_command(command: str, env: Dict = None, timeout: int = 10) -> Dict:
-    """Helper to run a shell command and capture stdout/stderr/exit code"""
+if __name__ == "__main__":
+    results = []
+    
+    # Run your tests
+    results.append(test_connectivity())
+    results.append(test_health())
+    
+    # Output JSON array to stdout
+    print(json.dumps(results, indent=2))
+```
+
+### 3. Environment Variables
+
+Use environment variables for configuration:
+
+```python
+# Namespace/location
+NAMESPACE = os.getenv('COMPONENT_NS', 'default-namespace')
+
+# Connection details
+HOST = os.getenv('COMPONENT_HOST', 'service.namespace.svc.cluster.local')
+PORT = os.getenv('COMPONENT_PORT', '8080')
+
+# Credentials (if needed)
+USERNAME = os.getenv('COMPONENT_USER', 'admin')
+PASSWORD = os.getenv('COMPONENT_PASSWORD', 'password')
+```
+
+### 4. Helper Function Pattern
+
+Use this standard helper for running commands:
+
+```python
+def run_command(command: str, env: Dict = None, timeout: int = 30) -> Dict:
+    """Run shell command and return result"""
     try:
         completed = subprocess.run(
             command,
@@ -48,250 +88,239 @@ def run_command(command: str, env: Dict = None, timeout: int = 10) -> Dict:
         return {"exit_code": 124, "stdout": "", "stderr": "Timeout"}
 ```
 
-## Return Dictionary Structure
+### 5. Test Function Pattern
 
-### Required Fields
-
-Each test function MUST return a list containing one or more dictionaries with these exact fields:
-
-| Field | Type | Description | Example |
-|-------|------|-------------|---------|
-| `name` | `str` | Unique identifier for the test | `"postgresql_connectivity"` |
-| `description` | `str` | Full description of what the test validates | `"Test PostgreSQL server connectivity"` |
-| `passed` | `bool` | Whether the test passed or failed | `True` or `False` |
-| `output` | `str` | Detailed human-readable result message | `"Connected to PostgreSQL 14.5 at host:5432"` |
-| `severity` | `str` | Impact level if test fails | `"LOW"`, `"WARNING"`, or `"CRITICAL"` |
-
-### Severity Levels
-
-- **`CRITICAL`**: Service is completely down or core functionality is broken
-- **`WARNING`**: Service is degraded or non-essential features are failing  
-- **`LOW`**: Informational or minor issues that don't impact functionality
-
-## Naming Conventions
-
-### Function Names
-
-Test functions must follow this pattern:
-- Main tests: `test_<component>_<aspect>()`
-- Sub-tests: `<component>_<specific>_<test>()`
-
-Examples:
-```python
-# Main test functions (return List[Dict])
-def test_postgresql_connectivity() -> List[Dict]:
-def test_postgresql_list_databases() -> List[Dict]:
-
-# Sub-test functions (return Dict) - called by test_databases()
-def postgresql_db_connectivity(db_info: Dict) -> Dict:
-def postgresql_db_write(db_info: Dict) -> Dict:
-```
-
-### Test Name Field
-
-The `name` field should follow: `<component>_<specific>_<aspect>`
-
-Examples:
-- `postgresql_connectivity`
-- `postgresql_myapp_write`
-- `grafana_datasource_connectivity`
-
-## Environment Variables
-
-Scripts should read configuration from environment variables with sensible defaults:
+Each test should return a properly formatted result:
 
 ```python
-host = os.getenv("POSTGRESQL_HOST", "default-host.cluster.local")
-port = os.getenv("POSTGRESQL_PORT", "5432")
-namespace = os.getenv("COMPONENT_NAMESPACE", "default")
-```
-
-## Output Field Guidelines
-
-The `output` field should provide actionable information:
-
-### Good Output Examples
-```python
-# Specific details about success
-"Connected to PostgreSQL 14.5 at db.example.com:5432, response time: 0.5s"
-
-# Clear failure reason with details
-"Authentication failed for user 'appuser' on database 'myapp'"
-
-# Aggregate information
-"Total databases: 5 (System: 2, User: 3 - app_db, test_db, prod_db)"
-
-# Multiple data points
-"All 3 pods healthy | prometheus-server: 1, alertmanager: 1, node-exporter: 1"
-```
-
-### Poor Output Examples
-```python
-# Too generic
-"Test passed"
-"Connection failed"
-
-# Not actionable
-"Error"
-"Something went wrong"
-```
-
-## Pattern for Testing Multiple Items
-
-When testing multiple databases/users/routes, use this pattern:
-
-```python
-def _get_databases() -> List[Dict]:
-    """Parse databases from environment variable"""
-    databases = []
-    databases_env = os.getenv("POSTGRES_DATABASES", "")
-    for db_config in databases_env.split(";"):
-        if db_config.strip():
-            parts = db_config.strip().split(":")
-            if len(parts) >= 4:
-                databases.append({
-                    "name": parts[0],
-                    "user": parts[1],
-                    "password": parts[2],
-                    "database": parts[3]
-                })
-    return databases
-
-def test_databases() -> List[Dict]:
-    """Test all configured databases"""
-    databases = _get_databases()
-    results = []
+def test_service_health() -> Dict:
+    """Test service health endpoint"""
+    cmd = f"curl -s http://{HOST}:{PORT}/health"
+    result = run_command(cmd, timeout=10)
     
-    for database in databases:
-        results.append(postgresql_db_connectivity(database))
-        results.append(postgresql_db_write(database))
-        results.append(postgresql_db_tables(database))
+    passed = result["exit_code"] == 0
     
-    return results
+    return {
+        "name": "service_health_check",
+        "description": "Check if service is responding",
+        "status": passed,
+        "output": result["stdout"] if passed else f"Failed: {result['stderr']}",
+        "severity": "CRITICAL" if not passed else "INFO"
+    }
 ```
 
-## Complete Example - PostgreSQL Test
+### 6. Severity Guidelines
+
+- **`INFO`**: Test passed or informational result
+- **`WARNING`**: Non-critical failure, service degraded but functional
+- **`CRITICAL`**: Critical failure, service is down or unusable
+
+### 7. Exit Codes (Optional but Recommended)
+
+```python
+def main():
+    results = test_all()
+    print(json.dumps(results, indent=2))
+    
+    # Exit with appropriate code
+    critical_failures = [r for r in results 
+                        if not r['status'] and r['severity'] == 'CRITICAL']
+    return 1 if critical_failures else 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+## Quick Start Template
 
 ```python
 #!/usr/bin/env python3
 import os
-from typing import List, Dict
+import json
 import subprocess
+from typing import List, Dict
 
-def run_command(command: str, env: Dict = None, timeout: int = 10) -> Dict:
-    """Helper to run a shell command and capture stdout/stderr/exit code"""
+def run_command(command: str, timeout: int = 30) -> Dict:
+    """Run shell command and return result"""
     try:
-        completed = subprocess.run(
-            command,
-            shell=True,
-            env=env or os.environ.copy(),
-            capture_output=True,
-            text=True,
+        result = subprocess.run(
+            command, 
+            shell=True, 
+            capture_output=True, 
+            text=True, 
             timeout=timeout
         )
         return {
-            "exit_code": completed.returncode,
-            "stdout": completed.stdout.strip(),
-            "stderr": completed.stderr.strip()
+            "exit_code": result.returncode, 
+            "stdout": result.stdout.strip(), 
+            "stderr": result.stderr.strip()
         }
     except subprocess.TimeoutExpired:
         return {"exit_code": 124, "stdout": "", "stderr": "Timeout"}
 
-def test_postgresql_connectivity() -> List[Dict]:
-    """Test PostgreSQL server connectivity"""
-    host = os.getenv("POSTGRESQL_HOST", "localhost")
-    port = os.getenv("POSTGRESQL_PORT", "5432")
-    admin_password = os.getenv("POSTGRESQL_ADMIN_PASSWORD", "")
-
-    conn_str = f"postgresql://postgres:{admin_password}@{host}:{port}/postgres"
-    result = run_command(f'psql "{conn_str}" -c "SELECT version();"')
-
-    if result["exit_code"] == 0 and "PostgreSQL" in result["stdout"]:
-        # Extract version for detailed output
-        version = "unknown"
-        for line in result["stdout"].split('\n'):
-            if "PostgreSQL" in line:
-                version = line.strip()
-                break
-        
-        return [{
-            "name": "postgresql_connectivity",
-            "description": "Test PostgreSQL server connectivity",
-            "passed": True,
-            "output": f"Connected to {version} at {host}:{port}",
-            "severity": "LOW"
-        }]
+def test_my_service() -> Dict:
+    """Example test function"""
+    result = run_command("your-test-command")
     
-    return [{
-        "name": "postgresql_connectivity",
-        "description": "Test PostgreSQL server connectivity", 
-        "passed": False,
-        "output": f"Connection failed to {host}:{port}: {result.get('stderr', 'Unknown error')}",
-        "severity": "CRITICAL"
-    }]
+    return {
+        "name": "my_service_test",
+        "description": "Test my service functionality",
+        "status": result["exit_code"] == 0,
+        "output": result["stdout"] or result["stderr"],
+        "severity": "CRITICAL" if result["exit_code"] != 0 else "INFO"
+    }
+
+def main():
+    """Main entry point"""
+    results = []
+    
+    # Add your tests here
+    results.append(test_my_service())
+    
+    # Output JSON to stdout
+    print(json.dumps(results, indent=2))
+    
+    # Return exit code based on critical failures
+    critical_failures = [r for r in results 
+                        if not r['status'] and r['severity'] == 'CRITICAL']
+    return 1 if critical_failures else 0
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
 ```
 
-## Usage in Your API
+## Examples
 
-Your API can call these functions and aggregate results:
+See the following reference implementations:
 
-```python
-# Collect all test results
-results = []
-results.extend(test_postgresql_connectivity())
-results.extend(test_postgresql_list_databases())
-results.extend(test_databases())
+- `test_apisix.py` - APISIX gateway testing
+- `test_kafka.py` - Kafka broker testing  
+- `test_minio.py` - MinIO object storage testing
 
-# Process results
-for result in results:
-    # API can access standardized fields
-    test_name = result['name']
-    test_passed = result['passed']
-    test_output = result['output']
-    test_severity = result['severity']
-    test_description = result['description']
-    
-    # Store, display, or process as needed
+## API Integration
+
+Once your script follows this format, it can be integrated with the testing API:
+
+**POST** `/tests/run`
+
+```json
+{
+  "system_id": "my-system",
+  "component": "my-service",
+  "host_url": "http://production-host.example.com",
+  "stack_url": "http://stack1.example.com:8000",
+  "git_url": "https://github.com/myorg/myrepo.git",
+  "git_branch": "main",
+  "git_folder_hierarchy": "tests",
+  "git_token": "ghp_xxxxxxxxxxxxx",
+  "custom_tests": ["test_my_service"]
+}
 ```
 
 ## Best Practices
 
-1. **Always return the exact dictionary structure** - Missing fields will break the API
-2. **Make output actionable** - Include specific values, counts, and identifiers
-3. **Use appropriate severity** - Don't mark everything as CRITICAL
-4. **Handle errors gracefully** - Return a proper failure dict rather than raising exceptions
-5. **Keep functions focused** - One test per function, return multiple dicts if testing multiple items
-6. **Use environment variables** - Never hardcode credentials or endpoints
-7. **Provide context in output** - Include hostnames, ports, versions, counts, etc.
+1. **Always validate inputs** - Check environment variables and fail gracefully
+2. **Use descriptive names** - Test names should clearly indicate what's being tested
+3. **Provide detailed output** - Include relevant information in the output field
+4. **Set appropriate severity** - Use CRITICAL for service-down scenarios
+5. **Handle timeouts** - Set reasonable timeouts for all operations
+6. **Clean up resources** - Remove temporary files/resources created during tests
+7. **Test independently** - Each test should be runnable on its own
+8. **Document environment variables** - List all required env vars at the top of your script
 
-## Testing Your Script
+## Common Patterns
 
-Before integration, verify your script follows the structure:
+### Testing Kubernetes Resources
 
 ```python
-# Test that all functions return correct structure
-import your_test_script
-
-results = your_test_script.test_your_component()
-
-for result in results:
-    assert 'name' in result
-    assert 'description' in result
-    assert 'passed' in result
-    assert 'output' in result
-    assert 'severity' in result
-    assert isinstance(result['passed'], bool)
-    assert result['severity'] in ['LOW', 'WARNING', 'CRITICAL']
-    print(f"✓ {result['name']} structure valid")
+def test_pod_health() -> Dict:
+    namespace = os.getenv('K8S_NAMESPACE', 'default')
+    cmd = f"kubectl get pods -n {namespace} -l app=myapp --no-headers"
+    result = run_command(cmd)
+    
+    if result["exit_code"] == 0:
+        pods = result["stdout"].split("\n")
+        running = [p for p in pods if "Running" in p]
+        status = len(running) == len(pods)
+        output = f"Pods: {len(running)}/{len(pods)} running"
+    else:
+        status = False
+        output = f"Failed to get pods: {result['stderr']}"
+    
+    return {
+        "name": "k8s_pod_health",
+        "status": status,
+        "output": output,
+        "severity": "CRITICAL" if not status else "INFO"
+    }
 ```
 
-## Summary
+### Testing HTTP Endpoints
 
-Following this structure ensures:
-- Consistent API integration
-- Clear test results
-- Actionable output messages
-- Proper error handling
-- Easy maintenance and debugging
+```python
+def test_http_endpoint() -> Dict:
+    url = os.getenv('SERVICE_URL', 'http://localhost:8080')
+    cmd = f"curl -s -o /dev/null -w '%{{http_code}}' {url}/health"
+    result = run_command(cmd, timeout=5)
+    
+    http_code = result["stdout"]
+    status = http_code in ["200", "204"]
+    
+    return {
+        "name": "http_health_check",
+        "status": status,
+        "output": f"HTTP {http_code}" if result["exit_code"] == 0 else "Connection failed",
+        "severity": "CRITICAL" if not status else "INFO"
+    }
+```
 
-All test scripts in the system follow this exact pattern, making them predictable and reliable for automated infrastructure testing.
+### Testing with Authentication
+
+```python
+def test_authenticated_endpoint() -> Dict:
+    url = os.getenv('API_URL')
+    token = os.getenv('API_TOKEN')
+    
+    cmd = f"curl -s -H 'Authorization: Bearer {token}' {url}/api/status"
+    result = run_command(cmd, timeout=10)
+    
+    try:
+        data = json.loads(result["stdout"])
+        status = data.get("status") == "healthy"
+        output = f"Service status: {data.get('status')}"
+    except:
+        status = False
+        output = "Failed to parse response"
+    
+    return {
+        "name": "api_auth_check",
+        "status": status,
+        "output": output,
+        "severity": "WARNING" if not status else "INFO"
+    }
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Script doesn't produce JSON output**
+   - Ensure you're using `print(json.dumps(results))` 
+   - Check for print statements that output non-JSON data
+
+2. **Tests timeout**
+   - Increase timeout values in `run_command()`
+   - Check for blocking operations
+
+3. **Environment variables not found**
+   - Provide sensible defaults with `os.getenv('VAR', 'default')`
+   - Document all required variables
+
+4. **Inconsistent test results**
+   - Ensure tests clean up after themselves
+   - Avoid dependencies between tests
+
+---
+
+**That's it!** Follow this structure and your script will integrate seamlessly with the testing API.
