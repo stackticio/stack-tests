@@ -1,0 +1,109 @@
+assafsauer@Assafs-MacBook-Pro test_4 % cat k8s/deploy/base/stack-agent/secret/cloud.env 
+
+API_KEY=a1b2c3d4e5f6789012345678901234567890abcd
+
+
+# ===== FASTAPI COMPONENTS =====
+
+# FastAPI Service - fastapi
+# Single FastAPI instance - using simple naming
+FASTAPI_HOST=fastapi.fastapi.svc.cluster.local
+FASTAPI_NS=fastapi
+FASTAPI_PORT=8080
+FASTAPI_LOGIN=Default_Pass1!
+FASTAPI_API_KEY=a1b2c3d4e5f6789012345678901234567890abcd
+FASTAPI_LINKS=api:exchange:api_key=false,dev:db:api_key=false,stage:db:api_key=false,prod:db:api_key=false
+
+# ===== COMPONENT CONNECTION INFO =====
+
+# MinIO - minio
+MINIO_HOST=minio.minio.svc.cluster.local
+MINIO_NS=minio
+MINIO_PORT=9000
+MINIO_ACCESS_KEY=change_access_key
+MINIO_SECRET_KEY=change_secret_key
+
+# APISIX Gateway - apisix
+APISIX_HOST=apisix-gateway.ingress-apisix.svc.cluster.local
+APISIX_NS=ingress-apisix
+APISIX_PORT=80
+APISIX_ADMIN_HOST=apisix-admin.ingress-apisix.svc.cluster.local
+APISIX_ADMIN_PORT=9180
+
+# CloudNativePG - cnpg
+CNPG_HOST=cnpg-rw.cnpg.svc.cluster.local
+CNPG_NS=cnpg
+CNPG_PORT=5432
+CNPG_ADMIN_PASSWORD=password_default1
+
+# RabbitMQ - rabbitmq
+RABBITMQ_HOST=rabbitmq.rabbitmq-system.svc.cluster.local
+RABBITMQ_NS=rabbitmq-system
+RABBITMQ_PORT=5672
+RABBITMQ_USER=user
+RABBITMQ_PASSWORD=default_pass1
+RABBITMQ_ADMIN_PASSWORD=default_password
+RABBITMQ_VHOST=/
+
+# Loki - loki
+LOKI_HOST=loki-gateway.loki.svc.cluster.local
+LOKI_NS=loki
+LOKI_PORT=3100
+LOKI_USER=user
+LOKI_PASS=Default_Pass1
+
+# Grafana - grafana
+GRAFANA_HOST=grafana.grafana.svc.cluster.local
+GRAFANA_NS=grafana
+GRAFANA_PORT=3000
+GRAFANA_ADMIN_PASSWORD=default_password
+
+# Kafka - kafka
+KAFKA_BOOTSTRAP_SERVERS=kafka-kafka-bootstrap.strimzi.svc.cluster.local:9092
+KAFKA_NS=strimzi
+
+# Prometheus - prometheus
+PROMETHEUS_HOST=prometheus.prometheus.svc.cluster.local
+PROMETHEUS_NS=prometheus
+PROMETHEUS_PORT=9090
+
+# ===== DATABASE CONNECTIONS =====
+
+# CNPG databases
+CNPG_DATABASES=stage:stage:pass_default1:stage;prod:prod:pass_default1:prod;dev:dev:pass_default1:dev
+
+# MinIO buckets
+MINIO_BUCKETS=loki:loki:min8chars1:min8chars1;sink:sink:min8chars1:min8chars1;cnpg:cnpg:min8chars1:min8chars1
+
+# RabbitMQ exchanges
+RABBITMQ_EXCHANGES=api-2,api
+
+# RabbitMQ queues  
+RABBITMQ_QUEUES=systems
+
+# Kafka topics
+KAFKA_TOPICS=topic
+
+# ===== IMAGE BASE COMPONENTS =====
+
+# Image Base Components List
+# Format: component_name:namespace
+IMAGE_BASE_COMPONENTS=prod:prod
+# Image Base - prod
+IMAGE_BASE_0_NAME=prod
+IMAGE_BASE_0_NAMESPACE=prod
+
+# ===== EXTERNAL SOURCE CODE COMPONENTS =====
+
+# External Source Code Components List
+# Format: component_name:namespace
+EXTERNAL_SOURCE_CODE_COMPONENTS=dev:dev,stage:stage
+# External Source Code - dev
+EXTERNAL_SOURCE_CODE_0_NAME=dev
+EXTERNAL_SOURCE_CODE_0_NAMESPACE=dev
+# External Source Code - stage
+EXTERNAL_SOURCE_CODE_1_NAME=stage
+EXTERNAL_SOURCE_CODE_1_NAMESPACE=stage
+
+# ===== OPA/GATEKEEPER POLICIES =====
+assafsauer@Assafs-MacBook-Pro test_4 % 
