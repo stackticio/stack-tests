@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Keycloak Metrics Analysis
-Analyzes Prometheus metrics from Keycloak
+Elasticsearch Metrics Analysis
+Analyzes Prometheus metrics from Elasticsearch
 
 ENV VARS:
-  KEYCLOAK_NS (default: keycloak)
-  KEYCLOAK_METRICS_PORT (default: 9000)
+  ELASTICSEARCH_NS (default: elasticsearch)
+  ELASTICSEARCH_METRICS_PORT (default: 9114)
 
 Output: JSON array of test results
 """
@@ -82,11 +82,11 @@ def count_metrics(metrics_text: str) -> int:
     return len(metrics)
 
 
-def test_keycloak_metrics() -> List[Dict[str, Any]]:
-    """Analyze Keycloak metrics"""
-    namespace = os.getenv("KEYCLOAK_NS", "keycloak")
-    port = int(os.getenv("KEYCLOAK_METRICS_PORT", "9000"))
-    service = "keycloak-metrics"
+def test_elasticsearch_metrics() -> List[Dict[str, Any]]:
+    """Analyze Elasticsearch exporter metrics"""
+    namespace = os.getenv("ELASTICSEARCH_NS", "elasticsearch")
+    port = int(os.getenv("ELASTICSEARCH_METRICS_PORT", "9114"))
+    service = "elasticsearch-metrics"
 
     results = []
 
@@ -94,8 +94,8 @@ def test_keycloak_metrics() -> List[Dict[str, Any]]:
 
     if not metrics_data:
         results.append(create_test_result(
-            "keycloak_metrics_availability",
-            "Check Keycloak metrics endpoint availability",
+            "elasticsearch_metrics_availability",
+            "Check Elasticsearch metrics exporter availability",
             False,
             f"Failed to fetch metrics from {service}.{namespace}:{port}",
             "CRITICAL"
@@ -104,99 +104,102 @@ def test_keycloak_metrics() -> List[Dict[str, Any]]:
 
     metric_count = count_metrics(metrics_data)
     results.append(create_test_result(
-        "keycloak_metrics_availability",
-        "Check Keycloak metrics endpoint availability",
+        "elasticsearch_metrics_availability",
+        "Check Elasticsearch metrics exporter availability",
         True,
         f"Successfully fetched {metric_count} unique metrics",
         "INFO"
     ))
 
-    # Login attempts
-    login_attempts = parse_metric_value(metrics_data, "keycloak_logins_total")
-    if login_attempts:
-        total_logins = sum(login_attempts)
+    # Cluster health
+    cluster_up = parse_metric_value(metrics_data, "elasticsearch_cluster_health_up")
+    if cluster_up:
+        is_up = cluster_up[0] == 1.0
         results.append(create_test_result(
-            "keycloak_login_attempts",
-            "Check Keycloak login attempts",
+            "elasticsearch_cluster_health",
+            "Check Elasticsearch cluster health status",
+            is_up,
+            "Cluster is UP" if is_up else "Cluster is DOWN",
+            "CRITICAL" if not is_up else "INFO"
+        ))
+
+    # Cluster status (green=0, yellow=1, red=2)
+    cluster_status = parse_metric_value(metrics_data, "elasticsearch_cluster_health_status")
+    if cluster_status:
+        status_val = int(cluster_status[0])
+        status_map = {0: "GREEN", 1: "YELLOW", 2: "RED"}
+        status_str = status_map.get(status_val, "UNKNOWN")
+
+        results.append(create_test_result(
+            "elasticsearch_cluster_status",
+            "Check Elasticsearch cluster status",
+            status_val == 0,
+            f"Cluster status: {status_str}",
+            "CRITICAL" if status_val == 2 else ("WARNING" if status_val == 1 else "INFO")
+        ))
+
+    # Active nodes
+    active_nodes = parse_metric_value(metrics_data, "elasticsearch_cluster_health_number_of_nodes")
+    if active_nodes:
+        node_count = int(active_nodes[0])
+        results.append(create_test_result(
+            "elasticsearch_active_nodes",
+            "Check Elasticsearch active nodes count",
+            node_count > 0,
+            f"{node_count} active nodes",
+            "WARNING" if node_count == 0 else "INFO"
+        ))
+
+    # Active shards
+    active_shards = parse_metric_value(metrics_data, "elasticsearch_cluster_health_active_shards")
+    if active_shards:
+        shard_count = int(active_shards[0])
+        results.append(create_test_result(
+            "elasticsearch_active_shards",
+            "Check Elasticsearch active shards",
             True,
-            f"{int(total_logins)} total login attempts",
+            f"{shard_count} active shards",
             "INFO"
         ))
 
-    # Failed logins
-    failed_logins = parse_metric_value(metrics_data, "keycloak_failed_login_attempts_total")
-    if failed_logins:
-        total_failed = sum(failed_logins)
+    # Relocating shards
+    relocating = parse_metric_value(metrics_data, "elasticsearch_cluster_health_relocating_shards")
+    if relocating:
+        relocating_count = int(relocating[0])
         results.append(create_test_result(
-            "keycloak_failed_logins",
-            "Check Keycloak failed login attempts",
-            True,
-            f"{int(total_failed)} failed login attempts",
-            "WARNING" if total_failed > 100 else "INFO"
+            "elasticsearch_relocating_shards",
+            "Check Elasticsearch relocating shards",
+            relocating_count == 0,
+            f"{relocating_count} shards relocating",
+            "WARNING" if relocating_count > 5 else "INFO"
         ))
 
-    # Registered users
-    registered_users = parse_metric_value(metrics_data, "keycloak_registrations_total")
-    if registered_users:
-        total_users = int(sum(registered_users))
+    # Unassigned shards
+    unassigned = parse_metric_value(metrics_data, "elasticsearch_cluster_health_unassigned_shards")
+    if unassigned:
+        unassigned_count = int(unassigned[0])
         results.append(create_test_result(
-            "keycloak_registered_users",
-            "Check Keycloak registered users",
-            True,
-            f"{total_users} total user registrations",
-            "INFO"
-        ))
-
-    # Active sessions
-    active_sessions = parse_metric_value(metrics_data, "keycloak_user_sessions_total")
-    if active_sessions:
-        session_count = int(sum(active_sessions))
-        results.append(create_test_result(
-            "keycloak_active_sessions",
-            "Check Keycloak active sessions",
-            True,
-            f"{session_count} active user sessions",
-            "INFO"
-        ))
-
-    # Process health (JVM metrics)
-    jvm_memory = parse_metric_value(metrics_data, "jvm_memory_used_bytes")
-    if jvm_memory:
-        total_memory_mb = sum(jvm_memory) / 1024 / 1024
-        results.append(create_test_result(
-            "keycloak_jvm_memory",
-            "Check Keycloak JVM memory usage",
-            True,
-            f"JVM memory: {total_memory_mb:.1f}MB",
-            "INFO"
-        ))
-
-    # Threads
-    jvm_threads = parse_metric_value(metrics_data, "jvm_threads_current")
-    if jvm_threads:
-        thread_count = int(jvm_threads[0])
-        results.append(create_test_result(
-            "keycloak_jvm_threads",
-            "Check Keycloak JVM threads",
-            True,
-            f"{thread_count} JVM threads",
-            "INFO"
+            "elasticsearch_unassigned_shards",
+            "Check Elasticsearch unassigned shards",
+            unassigned_count == 0,
+            f"{unassigned_count} unassigned shards",
+            "CRITICAL" if unassigned_count > 0 else "INFO"
         ))
 
     return results
 
 
-def test_keycloak() -> List[Dict[str, Any]]:
-    """Run all Keycloak metrics tests"""
-    all_results = test_keycloak_metrics()
+def test_elasticsearch() -> List[Dict[str, Any]]:
+    """Run all Elasticsearch metrics tests"""
+    all_results = test_elasticsearch_metrics()
 
     # Summary
     total_checks = len(all_results)
     passed_checks = sum(1 for r in all_results if r["status"])
 
     all_results.append(create_test_result(
-        "keycloak_summary",
-        "Overall Keycloak metrics summary",
+        "elasticsearch_summary",
+        "Overall Elasticsearch metrics summary",
         passed_checks >= total_checks * 0.7,
         f"{passed_checks}/{total_checks} checks passed ({passed_checks*100//total_checks if total_checks > 0 else 0}%)",
         "INFO" if passed_checks >= total_checks * 0.7 else "WARNING"
@@ -207,7 +210,7 @@ def test_keycloak() -> List[Dict[str, Any]]:
 
 if __name__ == "__main__":
     try:
-        results = test_keycloak()
+        results = test_elasticsearch()
         print(json.dumps(results, indent=2))
 
         critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "CRITICAL")

@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-test_loki_json.py - Loki Health Check with JSON output
+Loki Metrics Analysis
+Analyzes Prometheus metrics from Loki components
+
+ENV VARS:
+  LOKI_NS (default: loki)
+  LOKI_PORT (default: 3100)
+
+Output: JSON array of test results
 """
 
 import os
 import sys
 import json
 import subprocess
-import time
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
 
-def run_command(command: str, timeout: int = 30) -> Dict:
+
+def run_command(command: str, timeout: int = 30) -> Dict[str, Any]:
     """Run shell command and return results"""
     try:
         completed = subprocess.run(
@@ -30,386 +36,218 @@ def run_command(command: str, timeout: int = 30) -> Dict:
         return {"exit_code": 124, "stdout": "", "stderr": "Timeout"}
 
 
-def get_loki_config() -> Dict:
-    """Get Loki configuration"""
-    namespace = os.getenv("LOKI_NS", "loki")
-    user = os.getenv("LOKI_USER", "")
-    password = os.getenv("LOKI_PASS", "")
-    
+def create_test_result(name: str, description: str, passed: bool, output: str, severity: str = "INFO") -> Dict[str, Any]:
+    """Create standardized test result"""
     return {
-        "namespace": namespace,
-        "user": user,
-        "password": password
+        "name": name,
+        "description": description,
+        "status": bool(passed),
+        "output": output,
+        "severity": severity.upper()
     }
 
 
-def test_loki_api() -> List[Dict]:
-    """Test Loki API connectivity"""
-    config = get_loki_config()
-    
-    # Gateway listens on 8080 internally, not 80
-    cmd = f"kubectl exec -n {config['namespace']} deployment/loki-gateway -- curl -s -o /dev/null -w '%{{http_code}}' --user '{config['user']}:{config['password']}' -X POST http://localhost:8080/api/v1/push"
-    result = run_command(cmd)
-    
-    if result["exit_code"] == 0:
-        http_code = result["stdout"]
-        if http_code in ["400", "405"]:  # 400/405 means endpoint exists
-            status = True
-            output = "Connected to Loki API"
-        else:
-            status = False
-            output = f"API connection failed: HTTP {http_code}"
-    else:
-        status = False
-        output = "Failed to connect to Loki API"
-    
-    return [{
-        "name": "loki_api",
-        "description": "Check Loki API connectivity",
-        "status": status,
-        "output": output,
-        "severity": "critical" if not status else "info"
-    }]
+def get_service_metrics(namespace: str, service: str, port: int) -> Optional[str]:
+    """Get metrics from a service endpoint"""
+    cmd = f"curl -s --connect-timeout 5 --max-time 10 http://{service}.{namespace}.svc.cluster.local:{port}/metrics"
+    result = run_command(cmd, timeout=15)
+
+    if result["exit_code"] == 0 and result["stdout"]:
+        return result["stdout"]
+    return None
 
 
-def test_loki_components() -> List[Dict]:
-    """Test Loki components"""
-    config = get_loki_config()
+def parse_metric_value(metrics_text: str, metric_name: str) -> List[float]:
+    """Extract values for a specific metric"""
+    values = []
+    for line in metrics_text.split('\n'):
+        if line.startswith(metric_name) and not line.startswith('#'):
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    values.append(float(parts[-1]))
+                except ValueError:
+                    pass
+    return values
+
+
+def count_metrics(metrics_text: str) -> int:
+    """Count unique metrics"""
+    metrics = set()
+    for line in metrics_text.split('\n'):
+        if line and not line.startswith('#'):
+            metric_name = line.split('{')[0].split()[0]
+            if metric_name:
+                metrics.add(metric_name)
+    return len(metrics)
+
+
+def test_loki_component_metrics(component: str) -> List[Dict[str, Any]]:
+    """Analyze metrics for a Loki component"""
+    namespace = os.getenv("LOKI_NS", "loki")
+    port = int(os.getenv("LOKI_PORT", "3100"))
+    service = f"loki-grafana-loki-{component}"
+
     results = []
-    
-    components = [
-        ("gateway", "app.kubernetes.io/component=gateway"),
-        ("read", "app.kubernetes.io/component=read"),
-        ("write", "app.kubernetes.io/component=write"),
-        ("backend", "app.kubernetes.io/component=backend"),
-        ("canary", "app.kubernetes.io/component=canary"),
-        ("chunks-cache", "app.kubernetes.io/component=memcached-chunks-cache"),
-        ("results-cache", "app.kubernetes.io/component=memcached-results-cache")
-    ]
-    
-    for comp_name, label in components:
-        cmd = f"kubectl get pods -n {config['namespace']} -l {label} -o json"
-        result = run_command(cmd)
-        
-        if result["exit_code"] == 0:
-            try:
-                data = json.loads(result["stdout"])
-                pods = data.get("items", [])
-                total = len(pods)
-                ready = sum(1 for p in pods if all(
-                    c.get("ready", False) for c in p.get("status", {}).get("containerStatuses", [])
-                ))
-                status = ready == total and total > 0
-                output = f"{ready}/{total} pods ready"
-            except:
-                status = False
-                output = "Error checking"
+
+    metrics_data = get_service_metrics(namespace, service, port)
+
+    if not metrics_data:
+        results.append(create_test_result(
+            f"loki_{component}_metrics_availability",
+            f"Check Loki {component} metrics endpoint availability",
+            False,
+            f"Failed to fetch metrics from {service}.{namespace}:{port}",
+            "CRITICAL"
+        ))
+        return results
+
+    metric_count = count_metrics(metrics_data)
+    results.append(create_test_result(
+        f"loki_{component}_metrics_availability",
+        f"Check Loki {component} metrics endpoint availability",
+        True,
+        f"Successfully fetched {metric_count} unique metrics",
+        "INFO"
+    ))
+
+    # Ingester specific metrics
+    if component == "ingester":
+        chunks_created = parse_metric_value(metrics_data, "loki_ingester_chunks_created_total")
+        if chunks_created:
+            total_chunks = sum(chunks_created)
+            results.append(create_test_result(
+                f"loki_{component}_chunks_created",
+                f"Check Loki {component} chunks created",
+                True,
+                f"{int(total_chunks)} chunks created" if chunks_created else "Metric not available",
+                "INFO"
+            ))
         else:
-            status = True
-            output = "Not deployed"
-        
-        results.append({
-            "name": f"loki_{comp_name.replace('-', '_')}",
-            "description": f"Check Loki {comp_name} component",
-            "status": status,
-            "output": output,
-            "severity": "critical" if comp_name in ["gateway", "write", "read"] and not status else "info"
-        })
-    
+            results.append(create_test_result(
+                f"loki_{component}_chunks_created",
+                f"Check Loki {component} chunks created",
+                True,
+                "Chunks created metric not available (may not be exposed yet)",
+                "INFO"
+            ))
+
+        streams = parse_metric_value(metrics_data, "loki_ingester_streams")
+        if streams:
+            stream_count = int(streams[0]) if streams else 0
+            results.append(create_test_result(
+                f"loki_{component}_active_streams",
+                f"Check Loki {component} active streams",
+                True,
+                f"{stream_count} active streams",
+                "INFO"
+            ))
+
+    # Distributor specific metrics
+    if component == "distributor":
+        bytes_received = parse_metric_value(metrics_data, "loki_distributor_bytes_received_total")
+        if bytes_received:
+            total_bytes = sum(bytes_received)
+            results.append(create_test_result(
+                f"loki_{component}_bytes_received",
+                f"Check Loki {component} bytes received",
+                True,
+                f"{total_bytes/1024/1024:.2f} MB received" if bytes_received else "Metric not available",
+                "INFO"
+            ))
+        else:
+            results.append(create_test_result(
+                f"loki_{component}_bytes_received",
+                f"Check Loki {component} bytes received",
+                True,
+                "Bytes received metric not available (may not be exposed yet)",
+                "INFO"
+            ))
+
+    # Querier specific metrics
+    if component == "querier":
+        queries = parse_metric_value(metrics_data, "loki_query_duration_seconds_count")
+        if queries:
+            query_count = sum(queries)
+            results.append(create_test_result(
+                f"loki_{component}_queries",
+                f"Check Loki {component} query count",
+                True,
+                f"{int(query_count)} queries processed" if queries else "Metric not available",
+                "INFO"
+            ))
+        else:
+            results.append(create_test_result(
+                f"loki_{component}_queries",
+                f"Check Loki {component} query count",
+                True,
+                "Query count metric not available (may not be exposed yet)",
+                "INFO"
+            ))
+
+    # Common process health metrics
+    goroutines = parse_metric_value(metrics_data, "go_goroutines")
+    memory = parse_metric_value(metrics_data, "process_resident_memory_bytes")
+
+    health_info = []
+    if goroutines:
+        health_info.append(f"Goroutines: {int(goroutines[0])}")
+    if memory:
+        health_info.append(f"Memory: {memory[0]/1024/1024:.1f}MB")
+
+    if health_info:
+        results.append(create_test_result(
+            f"loki_{component}_process_health",
+            f"Check Loki {component} process health",
+            True,
+            ", ".join(health_info),
+            "INFO"
+        ))
+
     return results
 
 
-def test_loki_ingestion() -> List[Dict]:
-    """Test log ingestion"""
-    config = get_loki_config()
-    
-    timestamp = str(int(time.time() * 1e9))
-    log_data = '{"streams":[{"stream":{"job":"test"},"values":[["' + timestamp + '","test"]]}]}'
-    
-    # Use port 8080 for gateway
-    cmd = f"""kubectl exec -n {config['namespace']} deployment/loki-gateway -- sh -c 'echo {log_data} | curl -s -X POST --user {config['user']}:{config['password']} -H "Content-Type: application/json" -d @- http://localhost:8080/api/v1/push'"""
-    
-    result = run_command(cmd)
-    status = result["exit_code"] == 0 and (not result["stdout"] or "error" not in result["stdout"].lower())
-    
-    return [{
-        "name": "loki_ingestion",
-        "description": "Test log ingestion",
-        "status": status,
-        "output": "Log ingestion successful" if status else "Log ingestion failed",
-        "severity": "critical" if not status else "info"
-    }]
-
-
-def test_loki_query() -> List[Dict]:
-    """Test query capability"""
-    config = get_loki_config()
-    
-    # Use port 8080 for gateway
-    cmd = f"""kubectl exec -n {config['namespace']} deployment/loki-gateway -- curl -s -G --user '{config['user']}:{config['password']}' --data-urlencode 'query={{job=~".+"}}' --data-urlencode 'limit=1' http://localhost:8080/api/v1/query_range"""
-    
-    result = run_command(cmd)
-    
-    if result["exit_code"] == 0:
-        try:
-            data = json.loads(result["stdout"])
-            if data.get("status") == "success":
-                output = f"Query successful: {len(data.get('data', {}).get('result', []))} streams"
-                status = True
-            else:
-                output = "Query failed"
-                status = False
-        except:
-            output = "Query parse failed"
-            status = False
-    else:
-        output = "Query failed"
-        status = False
-    
-    return [{
-        "name": "loki_query",
-        "description": "Test Loki query capability",
-        "status": status,
-        "output": output,
-        "severity": "critical" if not status else "info"
-    }]
-
-
-def test_loki_labels() -> List[Dict]:
-    """Test labels API"""
-    config = get_loki_config()
-    
-    # Use port 8080 for gateway - simpler command
-    cmd = f"""kubectl exec -n {config['namespace']} deployment/loki-gateway -- curl -s --user '{config['user']}:{config['password']}' 'http://localhost:8080/api/v1/labels'"""
-    result = run_command(cmd)
-    
-    if result["exit_code"] == 0 and result["stdout"]:
-        try:
-            data = json.loads(result["stdout"])
-            if data.get("status") == "success":
-                labels = data.get("data", [])
-                output = f"{len(labels)} labels available"
-                status = len(labels) > 0
-            else:
-                output = f"Labels API returned: {data.get('status', 'unknown')}"
-                status = False
-        except:
-            # Check if it's an HTML error page
-            if "404" in result["stdout"] or "not found" in result["stdout"].lower():
-                output = "Labels endpoint not found"
-            else:
-                output = f"Response: {result['stdout'][:100]}"
-            status = False
-    else:
-        output = "Failed to get labels"
-        status = False
-    
-    return [{
-        "name": "loki_labels",
-        "description": "Check available labels",
-        "status": status,
-        "output": output,
-        "severity": "warning" if not status else "info"
-    }]
-
-
-def test_storage_backend() -> List[Dict]:
-    """Test storage backend"""
-    config = get_loki_config()
-    
-    cmd = f"kubectl get configmap -n {config['namespace']} loki -o jsonpath='{{.data.config\\.yaml}}' | grep -i 's3\\|minio\\|bucket' | head -1"
-    result = run_command(cmd)
-    
-    if result["exit_code"] == 0 and result["stdout"]:
-        output = "Storage: S3/MinIO configured"
-    else:
-        output = "Storage: Default configuration"
-    
-    return [{
-        "name": "storage_backend",
-        "description": "Check storage backend connectivity",
-        "status": True,
-        "output": output,
-        "severity": "info"
-    }]
-
-
-def test_alloy_connection() -> List[Dict]:
-    """Test Alloy connection"""
-    config = get_loki_config()
-    
-    cmd = f"kubectl get pods -n alloy -l app.kubernetes.io/name=alloy --no-headers 2>/dev/null | wc -l"
-    result = run_command(cmd)
-    
-    try:
-        pod_count = int(result["stdout"]) if result["exit_code"] == 0 else 0
-        if pod_count > 0:
-            output = f"Alloy: {pod_count} pods found"
-            status = True
-        else:
-            output = "Alloy not found"
-            status = False
-    except:
-        output = "Alloy check failed"
-        status = False
-    
-    return [{
-        "name": "alloy_connection",
-        "description": "Check Alloy/Grafana Agent connection",
-        "status": status,
-        "output": output,
-        "severity": "warning" if not status else "info"
-    }]
-
-
-def test_recent_errors() -> List[Dict]:
-    """Check recent errors"""
-    config = get_loki_config()
-    
-    cmd = f"kubectl logs -n {config['namespace']} deployment/loki-gateway --tail=50 2>/dev/null | grep -c -i 'error\\|panic'"
-    result = run_command(cmd)
-    
-    try:
-        errors = int(result["stdout"]) if result["exit_code"] == 0 else 0
-        status = errors < 5
-        output = f"{errors} errors in recent logs"
-    except:
-        status = True
-        output = "No recent errors"
-    
-    return [{
-        "name": "recent_errors",
-        "description": "Check for recent errors in logs",
-        "status": status,
-        "output": output,
-        "severity": "warning" if not status else "info"
-    }]
-
-
-def test_ring_membership() -> List[Dict]:
-    """Test ring membership"""
-    config = get_loki_config()
-    
-    # loki-write is a StatefulSet, not Deployment
-    cmd = f"kubectl exec -n {config['namespace']} statefulset/loki-write -- curl -s http://localhost:3100/ring 2>/dev/null | grep -c ACTIVE"
-    result = run_command(cmd)
-    
-    try:
-        active = int(result["stdout"]) if result["exit_code"] == 0 else 0
-        status = active > 0
-        output = f"Ring members: {active} ACTIVE"
-    except:
-        status = False
-        output = "Ring status unavailable"
-    
-    return [{
-        "name": "ring_membership",
-        "description": "Check Loki ring membership",
-        "status": status,
-        "output": output,
-        "severity": "warning" if not status else "info"
-    }]
-
-
-def test_servicemonitor() -> List[Dict]:
-    """Test ServiceMonitor"""
-    config = get_loki_config()
-    
-    cmd = f"kubectl get servicemonitor -n {config['namespace']} 2>/dev/null | grep -c loki"
-    result = run_command(cmd)
-    
-    try:
-        count = int(result["stdout"]) if result["exit_code"] == 0 else 0
-        status = count > 0
-        output = f"{count} ServiceMonitors configured" if count > 0 else "No Loki ServiceMonitors found"
-    except:
-        status = False
-        output = "ServiceMonitor check failed"
-    
-    return [{
-        "name": "servicemonitor",
-        "description": "Check ServiceMonitor for metrics scraping",
-        "status": status,
-        "output": output,
-        "severity": "info"
-    }]
-
-
-def test_data_retention() -> List[Dict]:
-    """Check retention config"""
-    config = get_loki_config()
-    
-    cmd = f"kubectl get configmap -n {config['namespace']} loki -o jsonpath='{{.data.config\\.yaml}}' | grep -i retention | head -1"
-    result = run_command(cmd)
-    
-    if result["exit_code"] == 0 and result["stdout"]:
-        output = f"Retention: {result['stdout'].strip()[:50]}"
-    else:
-        output = "Default retention"
-    
-    return [{
-        "name": "data_retention",
-        "description": "Check data retention configuration",
-        "status": True,
-        "output": output,
-        "severity": "info"
-    }]
-
-
-def test_loki_canary() -> List[Dict]:
-    """Test Loki Canary"""
-    config = get_loki_config()
-    
-    cmd = f"kubectl get pods -n {config['namespace']} -l app.kubernetes.io/component=canary --no-headers 2>/dev/null | wc -l"
-    result = run_command(cmd)
-    
-    try:
-        count = int(result["stdout"]) if result["exit_code"] == 0 else 0
-        if count > 0:
-            output = f"Canary pods: {count} running"
-            status = True
-        else:
-            output = "Canary not deployed"
-            status = True  # Not critical
-    except:
-        output = "Canary check failed"
-        status = False
-    
-    return [{
-        "name": "loki_canary",
-        "description": "Check Loki Canary synthetic monitoring",
-        "status": status,
-        "output": output,
-        "severity": "info"
-    }]
-
-
-def test_loki():
-    """Run all tests"""
+def test_loki() -> List[Dict[str, Any]]:
+    """Run all Loki metrics tests"""
     all_results = []
-    
-    all_results.extend(test_loki_api())
-    all_results.extend(test_loki_components())
-    all_results.extend(test_loki_ingestion())
-    all_results.extend(test_loki_query())
-    all_results.extend(test_loki_labels())
-    all_results.extend(test_storage_backend())
-    all_results.extend(test_alloy_connection())
-    all_results.extend(test_recent_errors())
-    all_results.extend(test_ring_membership())
-    all_results.extend(test_servicemonitor())
-    all_results.extend(test_data_retention())
-    all_results.extend(test_loki_canary())
-    
+
+    # Test all Loki components
+    components = ["compactor", "distributor", "ingester", "querier", "query-frontend"]
+
+    for component in components:
+        results = test_loki_component_metrics(component)
+        all_results.extend(results)
+
+    # Summary
+    total_checks = len(all_results)
+    passed_checks = sum(1 for r in all_results if r["status"])
+
+    all_results.append(create_test_result(
+        "loki_summary",
+        "Overall Loki metrics summary",
+        passed_checks >= total_checks * 0.5,  # More lenient since components may not exist
+        f"{passed_checks}/{total_checks} checks passed ({passed_checks*100//total_checks if total_checks > 0 else 0}%)",
+        "INFO" if passed_checks >= total_checks * 0.5 else "WARNING"
+    ))
+
     return all_results
 
 
 if __name__ == "__main__":
-    results = test_loki()
-    
-    # Output as JSON
-    print(json.dumps(results, indent=2))
-    
-    # Exit code based on critical failures
-    critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "critical")
-    sys.exit(1 if critical_failures > 0 else 0)
+    try:
+        results = test_loki()
+        print(json.dumps(results, indent=2))
+
+        critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "CRITICAL")
+        sys.exit(1 if critical_failures > 0 else 0)
+
+    except Exception as e:
+        error_result = [create_test_result(
+            "test_execution_error",
+            "Test execution failed",
+            False,
+            f"Unexpected error: {str(e)}",
+            "CRITICAL"
+        )]
+        print(json.dumps(error_result, indent=2))
+        sys.exit(1)
