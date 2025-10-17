@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-APISIX Metrics Analysis
-Analyzes Prometheus metrics from APISIX
+Metrics Server Analysis
+Analyzes Kubernetes metrics-server
 
 ENV VARS:
-  APISIX_NS (default: ingress-apisix)
-  APISIX_ADMIN_PORT (default: 9180)
+  METRICS_SERVER_NS (default: kube-system)
+  METRICS_SERVER_PORT (default: 443)
 
 Output: JSON array of test results
 """
@@ -48,8 +48,8 @@ def create_test_result(name: str, description: str, passed: bool, output: str, s
 
 
 def get_service_metrics(namespace: str, service: str, port: int) -> Optional[str]:
-    """Get metrics from a service endpoint"""
-    cmd = f"curl -s --connect-timeout 5 --max-time 10 http://{service}.{namespace}.svc.cluster.local:{port}/metrics"
+    """Get metrics from a service endpoint (HTTPS)"""
+    cmd = f"curl -s -k --connect-timeout 5 --max-time 10 https://{service}.{namespace}.svc.cluster.local:{port}/metrics"
     result = run_command(cmd, timeout=15)
 
     if result["exit_code"] == 0 and result["stdout"]:
@@ -82,11 +82,11 @@ def count_metrics(metrics_text: str) -> int:
     return len(metrics)
 
 
-def test_apisix_metrics() -> List[Dict[str, Any]]:
-    """Analyze APISIX metrics"""
-    namespace = os.getenv("APISIX_NS", "ingress-apisix")
-    port = int(os.getenv("APISIX_ADMIN_PORT", "9180"))
-    service = "apisix-admin"
+def test_metrics_server() -> List[Dict[str, Any]]:
+    """Analyze Metrics Server"""
+    namespace = os.getenv("METRICS_SERVER_NS", "kube-system")
+    port = int(os.getenv("METRICS_SERVER_PORT", "443"))
+    service = "metrics-server"
 
     results = []
 
@@ -94,8 +94,8 @@ def test_apisix_metrics() -> List[Dict[str, Any]]:
 
     if not metrics_data:
         results.append(create_test_result(
-            "apisix_metrics_availability",
-            "Check APISIX metrics endpoint availability",
+            "metrics_server_availability",
+            "Check Metrics Server endpoint availability",
             False,
             f"Failed to fetch metrics from {service}.{namespace}:{port}",
             "CRITICAL"
@@ -104,85 +104,76 @@ def test_apisix_metrics() -> List[Dict[str, Any]]:
 
     metric_count = count_metrics(metrics_data)
     results.append(create_test_result(
-        "apisix_metrics_availability",
-        "Check APISIX metrics endpoint availability",
+        "metrics_server_availability",
+        "Check Metrics Server endpoint availability",
         True,
         f"Successfully fetched {metric_count} unique metrics",
         "INFO"
     ))
 
-    # HTTP requests
-    http_requests = parse_metric_value(metrics_data, "apisix_http_requests_total")
-    if http_requests:
-        total_requests = int(sum(http_requests))
+    # API server requests
+    apiserver_requests = parse_metric_value(metrics_data, "apiserver_request_total")
+    if apiserver_requests:
+        total_requests = int(sum(apiserver_requests))
         results.append(create_test_result(
-            "apisix_http_requests",
-            "Check APISIX HTTP requests",
+            "metrics_server_api_requests",
+            "Check Metrics Server API requests",
             True,
-            f"{total_requests} total HTTP requests",
+            f"{total_requests} total API requests",
             "INFO"
         ))
 
-    # HTTP status
-    http_status = parse_metric_value(metrics_data, "apisix_http_status")
-    if http_status:
+    # Process stats
+    cpu_seconds = parse_metric_value(metrics_data, "process_cpu_seconds_total")
+    if cpu_seconds:
         results.append(create_test_result(
-            "apisix_http_status",
-            "Check APISIX HTTP status codes",
+            "metrics_server_cpu",
+            "Check Metrics Server CPU usage",
             True,
-            f"Status metrics available ({len(http_status)} entries)",
+            f"CPU usage: {cpu_seconds[0]:.2f}s",
             "INFO"
         ))
 
-    # Bandwidth
-    bandwidth = parse_metric_value(metrics_data, "apisix_bandwidth")
-    if bandwidth:
-        total_bandwidth = sum(bandwidth) / 1024 / 1024
+    memory = parse_metric_value(metrics_data, "process_resident_memory_bytes")
+    if memory:
+        memory_mb = memory[0] / 1024 / 1024
         results.append(create_test_result(
-            "apisix_bandwidth",
-            "Check APISIX bandwidth usage",
+            "metrics_server_memory",
+            "Check Metrics Server memory usage",
             True,
-            f"Total bandwidth: {total_bandwidth:.2f}MB",
+            f"Memory: {memory_mb:.1f}MB",
             "INFO"
         ))
 
-    # Nginx connections
-    connections = parse_metric_value(metrics_data, "nginx_http_current_connections")
-    if connections:
-        active_connections = int(connections[0]) if connections else 0
+    # Go routines
+    goroutines = parse_metric_value(metrics_data, "go_goroutines")
+    if goroutines:
         results.append(create_test_result(
-            "apisix_connections",
-            "Check APISIX active connections",
+            "metrics_server_goroutines",
+            "Check Metrics Server goroutines",
             True,
-            f"{active_connections} active connections",
+            f"{int(goroutines[0])} active goroutines",
             "INFO"
         ))
-
-    return results
-
-
-def test_apisix() -> List[Dict[str, Any]]:
-    """Run all APISIX metrics tests"""
-    all_results = test_apisix_metrics()
 
     # Summary
-    total_checks = len(all_results)
-    passed_checks = sum(1 for r in all_results if r["status"])
+    total_checks = len(results)
+    passed_checks = sum(1 for r in results if r["status"])
 
-    all_results.append(create_test_result(
-        "apisix_summary",
-        "Overall APISIX metrics summary",
+    results.append(create_test_result(
+        "metrics_server_summary",
+        "Overall Metrics Server summary",
         passed_checks >= total_checks * 0.7,
         f"{passed_checks}/{total_checks} checks passed ({passed_checks*100//total_checks if total_checks > 0 else 0}%)",
         "INFO" if passed_checks >= total_checks * 0.7 else "WARNING"
     ))
 
-    return all_results
+    return results
 
 
 if __name__ == "__main__":
     try:
-        results = test_apisix()
+        results = test_metrics_server()
         print(json.dumps(results, indent=2))
 
         critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "CRITICAL")

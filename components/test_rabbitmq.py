@@ -4,8 +4,8 @@ RabbitMQ Metrics Analysis
 Analyzes Prometheus metrics from RabbitMQ
 
 ENV VARS:
-  RABBITMQ_NS (default: rabbitmq)
-  RABBITMQ_METRICS_PORT (default: 9419)
+  RABBITMQ_NS (default: rabbitmq-system)
+  RABBITMQ_METRICS_PORT (default: 15692)
 
 Output: JSON array of test results
 """
@@ -84,8 +84,8 @@ def count_metrics(metrics_text: str) -> int:
 
 def test_rabbitmq_metrics() -> List[Dict[str, Any]]:
     """Analyze RabbitMQ metrics"""
-    namespace = os.getenv("RABBITMQ_NS", "rabbitmq")
-    port = int(os.getenv("RABBITMQ_METRICS_PORT", "9419"))
+    namespace = os.getenv("RABBITMQ_NS", "rabbitmq-system")
+    port = int(os.getenv("RABBITMQ_METRICS_PORT", "15692"))
     service = "rabbitmq"
 
     results = []

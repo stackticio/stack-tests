@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-APISIX Metrics Analysis
-Analyzes Prometheus metrics from APISIX
+GMP Alertmanager Metrics Analysis
+Analyzes Prometheus metrics from GMP (Google Managed Prometheus) Alertmanager
 
 ENV VARS:
-  APISIX_NS (default: ingress-apisix)
-  APISIX_ADMIN_PORT (default: 9180)
+  GMP_NS (default: gmp-system)
+  GMP_ALERTMANAGER_PORT (default: 9093)
 
 Output: JSON array of test results
 """
@@ -82,11 +82,11 @@ def count_metrics(metrics_text: str) -> int:
     return len(metrics)
 
 
-def test_apisix_metrics() -> List[Dict[str, Any]]:
-    """Analyze APISIX metrics"""
-    namespace = os.getenv("APISIX_NS", "ingress-apisix")
-    port = int(os.getenv("APISIX_ADMIN_PORT", "9180"))
-    service = "apisix-admin"
+def test_gmp_alertmanager_metrics() -> List[Dict[str, Any]]:
+    """Analyze GMP Alertmanager metrics"""
+    namespace = os.getenv("GMP_NS", "gmp-system")
+    port = int(os.getenv("GMP_ALERTMANAGER_PORT", "9093"))
+    service = "alertmanager"
 
     results = []
 
@@ -94,8 +94,8 @@ def test_apisix_metrics() -> List[Dict[str, Any]]:
 
     if not metrics_data:
         results.append(create_test_result(
-            "apisix_metrics_availability",
-            "Check APISIX metrics endpoint availability",
+            "gmp_alertmanager_metrics_availability",
+            "Check GMP Alertmanager metrics endpoint availability",
             False,
             f"Failed to fetch metrics from {service}.{namespace}:{port}",
             "CRITICAL"
@@ -104,74 +104,74 @@ def test_apisix_metrics() -> List[Dict[str, Any]]:
 
     metric_count = count_metrics(metrics_data)
     results.append(create_test_result(
-        "apisix_metrics_availability",
-        "Check APISIX metrics endpoint availability",
+        "gmp_alertmanager_metrics_availability",
+        "Check GMP Alertmanager metrics endpoint availability",
         True,
         f"Successfully fetched {metric_count} unique metrics",
         "INFO"
     ))
 
-    # HTTP requests
-    http_requests = parse_metric_value(metrics_data, "apisix_http_requests_total")
-    if http_requests:
-        total_requests = int(sum(http_requests))
+    # Alertmanager status
+    alerts = parse_metric_value(metrics_data, "alertmanager_alerts")
+    if alerts:
+        active_alerts = int(sum(alerts))
         results.append(create_test_result(
-            "apisix_http_requests",
-            "Check APISIX HTTP requests",
+            "gmp_alertmanager_active_alerts",
+            "Check GMP Alertmanager active alerts",
             True,
-            f"{total_requests} total HTTP requests",
+            f"{active_alerts} active alerts",
+            "WARNING" if active_alerts > 0 else "INFO"
+        ))
+
+    # Silences
+    silences = parse_metric_value(metrics_data, "alertmanager_silences")
+    if silences:
+        active_silences = int(silences[0]) if silences else 0
+        results.append(create_test_result(
+            "gmp_alertmanager_silences",
+            "Check GMP Alertmanager silences",
+            True,
+            f"{active_silences} active silences",
             "INFO"
         ))
 
-    # HTTP status
-    http_status = parse_metric_value(metrics_data, "apisix_http_status")
-    if http_status:
+    # Notifications
+    notifications = parse_metric_value(metrics_data, "alertmanager_notifications_total")
+    if notifications:
+        total_notifications = int(sum(notifications))
         results.append(create_test_result(
-            "apisix_http_status",
-            "Check APISIX HTTP status codes",
+            "gmp_alertmanager_notifications",
+            "Check GMP Alertmanager notifications",
             True,
-            f"Status metrics available ({len(http_status)} entries)",
+            f"{total_notifications} total notifications sent",
             "INFO"
         ))
 
-    # Bandwidth
-    bandwidth = parse_metric_value(metrics_data, "apisix_bandwidth")
-    if bandwidth:
-        total_bandwidth = sum(bandwidth) / 1024 / 1024
+    # Config status
+    config_hash = parse_metric_value(metrics_data, "alertmanager_config_hash")
+    if config_hash:
         results.append(create_test_result(
-            "apisix_bandwidth",
-            "Check APISIX bandwidth usage",
+            "gmp_alertmanager_config",
+            "Check GMP Alertmanager configuration",
             True,
-            f"Total bandwidth: {total_bandwidth:.2f}MB",
-            "INFO"
-        ))
-
-    # Nginx connections
-    connections = parse_metric_value(metrics_data, "nginx_http_current_connections")
-    if connections:
-        active_connections = int(connections[0]) if connections else 0
-        results.append(create_test_result(
-            "apisix_connections",
-            "Check APISIX active connections",
-            True,
-            f"{active_connections} active connections",
+            "Configuration loaded successfully",
             "INFO"
         ))
 
     return results
 
 
-def test_apisix() -> List[Dict[str, Any]]:
-    """Run all APISIX metrics tests"""
-    all_results = test_apisix_metrics()
+def test_gmp_alertmanager() -> List[Dict[str, Any]]:
+    """Run all GMP Alertmanager metrics tests"""
+    all_results = test_gmp_alertmanager_metrics()
 
     # Summary
     total_checks = len(all_results)
     passed_checks = sum(1 for r in all_results if r["status"])
 
     all_results.append(create_test_result(
-        "apisix_summary",
-        "Overall APISIX metrics summary",
+        "gmp_alertmanager_summary",
+        "Overall GMP Alertmanager metrics summary",
         passed_checks >= total_checks * 0.7,
         f"{passed_checks}/{total_checks} checks passed ({passed_checks*100//total_checks if total_checks > 0 else 0}%)",
         "INFO" if passed_checks >= total_checks * 0.7 else "WARNING"
@@ -182,7 +182,7 @@ def test_apisix() -> List[Dict[str, Any]]:
 
 if __name__ == "__main__":
     try:
-        results = test_apisix()
+        results = test_gmp_alertmanager()
         print(json.dumps(results, indent=2))
 
         critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "CRITICAL")
