@@ -82,22 +82,21 @@ def count_metrics(metrics_text: str) -> int:
     return len(metrics)
 
 
-def test_loki_component_metrics(component: str) -> List[Dict[str, Any]]:
+def test_loki_component_metrics(component: str, service_name: str) -> List[Dict[str, Any]]:
     """Analyze metrics for a Loki component"""
     namespace = os.getenv("LOKI_NS", "loki")
     port = int(os.getenv("LOKI_PORT", "3100"))
-    service = f"loki-grafana-loki-{component}"
 
     results = []
 
-    metrics_data = get_service_metrics(namespace, service, port)
+    metrics_data = get_service_metrics(namespace, service_name, port)
 
     if not metrics_data:
         results.append(create_test_result(
             f"loki_{component}_metrics_availability",
             f"Check Loki {component} metrics endpoint availability",
             False,
-            f"Failed to fetch metrics from {service}.{namespace}:{port}",
+            f"Failed to fetch metrics from {service_name}.{namespace}:{port}",
             "CRITICAL"
         ))
         return results
@@ -211,11 +210,15 @@ def test_loki() -> List[Dict[str, Any]]:
     """Run all Loki metrics tests"""
     all_results = []
 
-    # Test all Loki components
-    components = ["compactor", "distributor", "ingester", "querier", "query-frontend"]
+    # Test Loki services - using actual service names
+    components = [
+        ("backend", "loki-backend"),
+        ("read", "loki-read"),
+        ("write", "loki-write")
+    ]
 
-    for component in components:
-        results = test_loki_component_metrics(component)
+    for component_name, service_name in components:
+        results = test_loki_component_metrics(component_name, service_name)
         all_results.extend(results)
 
     # Summary
