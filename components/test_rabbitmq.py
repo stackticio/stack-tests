@@ -61,7 +61,7 @@ def parse_metric_value(metrics_text: str, metric_name: str) -> List[float]:
     """Extract values for a specific metric"""
     values = []
     for line in metrics_text.split('\n'):
-        if line.startswith(metric_name) and not line.startswith('#'):
+        if line.startswith(metric_name + ' ') and not line.startswith('#'):
             parts = line.split()
             if len(parts) >= 2:
                 try:
@@ -111,115 +111,162 @@ def test_rabbitmq_metrics() -> List[Dict[str, Any]]:
         "INFO"
     ))
 
-    # Node status
-    rabbitmq_up = parse_metric_value(metrics_data, "rabbitmq_identity_info")
-    if rabbitmq_up:
+    # Uptime - check if RabbitMQ is running
+    uptime = parse_metric_value(metrics_data, "rabbitmq_erlang_uptime_seconds")
+    if uptime:
+        uptime_hours = uptime[0] / 3600
         results.append(create_test_result(
-            "rabbitmq_node_status",
-            "Check RabbitMQ node status",
+            "rabbitmq_uptime",
+            "Check RabbitMQ uptime",
             True,
-            f"RabbitMQ node is running ({len(rabbitmq_up)} node(s))",
+            f"RabbitMQ running for {uptime_hours:.1f} hours",
             "INFO"
-        ))
-
-    # Queue metrics
-    queue_messages = parse_metric_value(metrics_data, "rabbitmq_queue_messages")
-    if queue_messages:
-        total_messages = int(sum(queue_messages))
-        results.append(create_test_result(
-            "rabbitmq_queue_messages",
-            "Check RabbitMQ queue messages",
-            True,
-            f"{total_messages} messages in queues",
-            "WARNING" if total_messages > 10000 else "INFO"
         ))
     else:
         results.append(create_test_result(
+            "rabbitmq_uptime",
+            "Check RabbitMQ uptime",
+            False,
+            "Unable to determine uptime - service may be down",
+            "CRITICAL"
+        ))
+        return results
+
+    # Queue messages ready (unprocessed)
+    messages_ready = parse_metric_value(metrics_data, "rabbitmq_queue_messages_ready")
+    messages_unacked = parse_metric_value(metrics_data, "rabbitmq_queue_messages_unacked")
+
+    if messages_ready:
+        ready_count = int(sum(messages_ready))
+        unacked_count = int(sum(messages_unacked)) if messages_unacked else 0
+        total_messages = ready_count + unacked_count
+
+        # CRITICAL: Messages piling up with no consumers
+        has_problem = ready_count > 1000
+        results.append(create_test_result(
             "rabbitmq_queue_messages",
-            "Check RabbitMQ queue messages",
-            True,
-            "Queue messages metric not available (may not have queues yet)",
-            "INFO"
+            "Check RabbitMQ queue backlog",
+            not has_problem,
+            f"{ready_count} ready, {unacked_count} unacked (total: {total_messages})",
+            "WARNING" if has_problem else "INFO"
         ))
 
-    # Consumers
+    # Consumers - CRITICAL if messages but no consumers
     consumers = parse_metric_value(metrics_data, "rabbitmq_queue_consumers")
     if consumers:
         total_consumers = int(sum(consumers))
-        results.append(create_test_result(
-            "rabbitmq_consumers",
-            "Check RabbitMQ consumers",
-            True,
-            f"{total_consumers} active consumers",
-            "INFO"
-        ))
+        has_messages = messages_ready and sum(messages_ready) > 0
+        no_consumers = total_consumers == 0
 
-    # Connections
-    connections = parse_metric_value(metrics_data, "rabbitmq_connections")
-    if connections:
-        connection_count = int(connections[0]) if connections else 0
-        results.append(create_test_result(
-            "rabbitmq_connections",
-            "Check RabbitMQ connections",
-            True,
-            f"{connection_count} active connections",
-            "INFO"
-        ))
-    else:
-        results.append(create_test_result(
-            "rabbitmq_connections",
-            "Check RabbitMQ connections",
-            True,
-            "Connections metric not available",
-            "INFO"
-        ))
+        # Problem: messages waiting but no consumers to process them
+        if has_messages and no_consumers:
+            results.append(create_test_result(
+                "rabbitmq_consumers",
+                "Check RabbitMQ consumers",
+                False,
+                f"0 consumers but {int(sum(messages_ready))} messages waiting!",
+                "CRITICAL"
+            ))
+        else:
+            results.append(create_test_result(
+                "rabbitmq_consumers",
+                "Check RabbitMQ consumers",
+                True,
+                f"{total_consumers} active consumers",
+                "INFO"
+            ))
 
-    # Channels
-    channels = parse_metric_value(metrics_data, "rabbitmq_channels")
-    if channels:
-        channel_count = int(channels[0]) if channels else 0
-        results.append(create_test_result(
-            "rabbitmq_channels",
-            "Check RabbitMQ channels",
-            True,
-            f"{channel_count} active channels",
-            "INFO"
-        ))
+    # Connection churn - check if connections are flapping
+    conn_opened = parse_metric_value(metrics_data, "rabbitmq_connections_opened_total")
+    conn_closed = parse_metric_value(metrics_data, "rabbitmq_connections_closed_total")
+    if conn_opened and conn_closed:
+        opened = int(conn_opened[0])
+        closed = int(conn_closed[0])
+        # If connections are constantly opening/closing, that's a problem
+        if closed > 100:
+            results.append(create_test_result(
+                "rabbitmq_connection_stability",
+                "Check RabbitMQ connection stability",
+                False,
+                f"{closed} connections closed (possible connection flapping)",
+                "WARNING"
+            ))
+        else:
+            results.append(create_test_result(
+                "rabbitmq_connection_stability",
+                "Check RabbitMQ connection stability",
+                True,
+                f"{opened} opened, {closed} closed",
+                "INFO"
+            ))
 
-    # Memory usage
+    # Memory usage - check against limit
     memory = parse_metric_value(metrics_data, "rabbitmq_process_resident_memory_bytes")
-    if memory:
+    memory_limit = parse_metric_value(metrics_data, "rabbitmq_resident_memory_limit_bytes")
+
+    if memory and memory_limit:
         memory_mb = memory[0] / 1024 / 1024
+        limit_mb = memory_limit[0] / 1024 / 1024
+        memory_pct = (memory[0] / memory_limit[0]) * 100
+
+        # Warning if using >80% of memory limit
+        has_problem = memory_pct > 80
         results.append(create_test_result(
             "rabbitmq_memory_usage",
             "Check RabbitMQ memory usage",
-            True,
-            f"Memory: {memory_mb:.1f}MB",
-            "INFO"
+            not has_problem,
+            f"Memory: {memory_mb:.1f}MB / {limit_mb:.1f}MB ({memory_pct:.1f}% used)",
+            "WARNING" if has_problem else "INFO"
         ))
 
-    # Disk space
+    # Disk space - check against limit
     disk_free = parse_metric_value(metrics_data, "rabbitmq_disk_space_available_bytes")
-    if disk_free:
+    disk_limit = parse_metric_value(metrics_data, "rabbitmq_disk_space_available_limit_bytes")
+
+    if disk_free and disk_limit:
         disk_gb = disk_free[0] / 1024 / 1024 / 1024
+        limit_gb = disk_limit[0] / 1024 / 1024 / 1024
+
+        # CRITICAL if below disk limit threshold
+        below_limit = disk_free[0] < disk_limit[0]
         results.append(create_test_result(
             "rabbitmq_disk_space",
             "Check RabbitMQ disk space",
-            disk_gb > 1.0,
-            f"Free disk space: {disk_gb:.2f}GB",
-            "WARNING" if disk_gb < 1.0 else "INFO"
+            not below_limit,
+            f"Free: {disk_gb:.2f}GB (limit: {limit_gb:.2f}GB)" + (" - BELOW LIMIT!" if below_limit else ""),
+            "CRITICAL" if below_limit else "INFO"
         ))
 
-    # Message rates
-    publish_rate = parse_metric_value(metrics_data, "rabbitmq_channel_messages_published_total")
-    if publish_rate:
-        total_published = int(sum(publish_rate))
+    # File descriptors - check if running out
+    fds_used = parse_metric_value(metrics_data, "rabbitmq_process_open_fds")
+    fds_limit = parse_metric_value(metrics_data, "rabbitmq_process_max_fds")
+
+    if fds_used and fds_limit:
+        fds_pct = (fds_used[0] / fds_limit[0]) * 100
+        has_problem = fds_pct > 80
+
         results.append(create_test_result(
-            "rabbitmq_publish_rate",
-            "Check RabbitMQ message publish rate",
-            True,
-            f"{total_published} messages published",
-            "INFO"
+            "rabbitmq_file_descriptors",
+            "Check RabbitMQ file descriptor usage",
+            not has_problem,
+            f"{int(fds_used[0])}/{int(fds_limit[0])} FDs used ({fds_pct:.1f}%)",
+            "WARNING" if has_problem else "INFO"
+        ))
+
+    # Erlang processes
+    erlang_procs = parse_metric_value(metrics_data, "rabbitmq_erlang_processes_used")
+    erlang_limit = parse_metric_value(metrics_data, "rabbitmq_erlang_processes_limit")
+
+    if erlang_procs and erlang_limit:
+        proc_pct = (erlang_procs[0] / erlang_limit[0]) * 100
+        has_problem = proc_pct > 80
+
+        results.append(create_test_result(
+            "rabbitmq_erlang_processes",
+            "Check RabbitMQ Erlang process usage",
+            not has_problem,
+            f"{int(erlang_procs[0])}/{int(erlang_limit[0])} processes ({proc_pct:.1f}%)",
+            "WARNING" if has_problem else "INFO"
         ))
 
     return results

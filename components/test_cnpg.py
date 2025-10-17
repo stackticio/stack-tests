@@ -72,7 +72,7 @@ def parse_metric_value(metrics_text: str, metric_name: str) -> List[float]:
     """Extract values for a specific metric"""
     values = []
     for line in metrics_text.split('\n'):
-        if line.startswith(metric_name) and not line.startswith('#'):
+        if line.startswith(metric_name + " ") and not line.startswith('#'):
             parts = line.split()
             if len(parts) >= 2:
                 try:
