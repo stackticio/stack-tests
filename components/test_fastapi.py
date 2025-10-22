@@ -601,6 +601,153 @@ def test_secret_management() -> Dict[str, Any]:
         )
 
 
+def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
+    """Check if ServiceAccount has overly permissive cluster roles"""
+    namespace = os.getenv("FASTAPI_NS", "fastapi")
+    sa_name = os.getenv("FASTAPI_SA", "fastapi")
+
+    cmd = f"kubectl get clusterrolebindings -o json 2>/dev/null"
+    result = run_command(cmd, timeout=10)
+
+    if result["exit_code"] != 0:
+        return create_result(
+            "fastapi_rbac_permissive_roles",
+            "Check for overly permissive RBAC cluster roles",
+            True,
+            "Unable to check ClusterRoleBindings",
+            "INFO"
+        )
+
+    try:
+        bindings = json.loads(result["stdout"])
+        risky_roles = []
+
+        for binding in bindings.get("items", []):
+            subjects = binding.get("subjects", [])
+            role_ref = binding.get("roleRef", {})
+
+            for subject in subjects:
+                if (subject.get("kind") == "ServiceAccount" and
+                    subject.get("name") == sa_name and
+                    subject.get("namespace") == namespace):
+
+                    role_name = role_ref.get("name", "")
+
+                    if role_name in ["cluster-admin", "admin", "edit"]:
+                        risky_roles.append(f"'{role_name}' (full cluster access)")
+                    elif "admin" in role_name.lower():
+                        risky_roles.append(f"'{role_name}' (potentially risky)")
+
+        if risky_roles:
+            return create_result(
+                "fastapi_rbac_permissive_roles",
+                "Check for overly permissive RBAC cluster roles",
+                False,
+                f"CRITICAL: Overly permissive roles: {', '.join(risky_roles)}",
+                "CRITICAL"
+            )
+
+        return create_result(
+            "fastapi_rbac_permissive_roles",
+            "Check for overly permissive RBAC cluster roles",
+            True,
+            "No overly permissive cluster roles detected",
+            "INFO"
+        )
+
+    except json.JSONDecodeError:
+        return create_result(
+            "fastapi_rbac_permissive_roles",
+            "Check for overly permissive RBAC cluster roles",
+            True,
+            "Unable to parse ClusterRoleBindings",
+            "INFO"
+        )
+
+
+def test_rbac_cross_namespace_access() -> Dict[str, Any]:
+    """Test if ServiceAccount can access resources in other namespaces"""
+    namespace = os.getenv("FASTAPI_NS", "fastapi")
+    sa_name = os.getenv("FASTAPI_SA", "fastapi")
+    sa_full = f"system:serviceaccount:{namespace}:{sa_name}"
+
+    issues = []
+
+    # Test access to kube-system secrets
+    cmd = f"kubectl auth can-i get secrets --as={sa_full} -n kube-system 2>/dev/null"
+    result = run_command(cmd, timeout=5)
+    if result["exit_code"] == 0 and "yes" in result["stdout"].lower():
+        issues.append("Can access secrets in kube-system")
+
+    # Test cluster-wide pod access
+    cmd = f"kubectl auth can-i get pods --as={sa_full} --all-namespaces 2>/dev/null"
+    result = run_command(cmd, timeout=5)
+    if result["exit_code"] == 0 and "yes" in result["stdout"].lower():
+        issues.append("Can list pods cluster-wide")
+
+    if issues:
+        return create_result(
+            "fastapi_rbac_cross_namespace",
+            "Test RBAC cross-namespace access permissions",
+            False,
+            f"WARNING: Cross-namespace access: {', '.join(issues)}",
+            "WARNING"
+        )
+
+    return create_result(
+        "fastapi_rbac_cross_namespace",
+        "Test RBAC cross-namespace access permissions",
+        True,
+        "No excessive cross-namespace access detected",
+        "INFO"
+    )
+
+
+def test_rbac_destructive_permissions() -> Dict[str, Any]:
+    """Test if ServiceAccount has destructive RBAC permissions"""
+    namespace = os.getenv("FASTAPI_NS", "fastapi")
+    sa_name = os.getenv("FASTAPI_SA", "fastapi")
+    sa_full = f"system:serviceaccount:{namespace}:{sa_name}"
+
+    risky_permissions = []
+
+    # Test delete pods
+    cmd = f"kubectl auth can-i delete pods --as={sa_full} -n {namespace} 2>/dev/null"
+    result = run_command(cmd, timeout=5)
+    if result["exit_code"] == 0 and "yes" in result["stdout"].lower():
+        risky_permissions.append("delete pods")
+
+    # Test delete namespaces
+    cmd = f"kubectl auth can-i delete namespaces --as={sa_full} 2>/dev/null"
+    result = run_command(cmd, timeout=5)
+    if result["exit_code"] == 0 and "yes" in result["stdout"].lower():
+        risky_permissions.append("delete namespaces (CRITICAL)")
+
+    # Test create clusterrolebindings (privilege escalation)
+    cmd = f"kubectl auth can-i create clusterrolebindings --as={sa_full} 2>/dev/null"
+    result = run_command(cmd, timeout=5)
+    if result["exit_code"] == 0 and "yes" in result["stdout"].lower():
+        risky_permissions.append("create clusterrolebindings (privilege escalation)")
+
+    if risky_permissions:
+        severity = "CRITICAL" if any("CRITICAL" in p or "escalation" in p for p in risky_permissions) else "WARNING"
+        return create_result(
+            "fastapi_rbac_destructive_perms",
+            "Test for destructive RBAC permissions",
+            False,
+            f"{severity}: Risky permissions: {', '.join(risky_permissions)}",
+            severity
+        )
+
+    return create_result(
+        "fastapi_rbac_destructive_perms",
+        "Test for destructive RBAC permissions",
+        True,
+        "No excessive destructive permissions detected",
+        "INFO"
+    )
+
+
 def test_fastapi_security() -> List[Dict[str, Any]]:
     """Run all FastAPI security tests"""
     results = []
@@ -619,6 +766,11 @@ def test_fastapi_security() -> List[Dict[str, Any]]:
     # Container & Kubernetes Security
     results.append(test_pod_security_context())
     results.append(test_secret_management())
+
+    # RBAC Security
+    results.append(test_rbac_overly_permissive_roles())
+    results.append(test_rbac_cross_namespace_access())
+    results.append(test_rbac_destructive_permissions())
 
     # Summary
     total_checks = len(results)
