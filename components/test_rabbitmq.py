@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """
-RabbitMQ Metrics Analysis
-Analyzes Prometheus metrics from RabbitMQ
+RabbitMQ Resource Estimation
+Analyzes actual resource usage and provides scaling recommendations
+
+Uses:
+- Prometheus metrics (CPU, memory, disk usage over time)
+- kubectl get pod resources (requests/limits)
+- kubectl top (current usage)
+- Service metrics (queue depth, connections, etc.)
 
 ENV VARS:
   RABBITMQ_NS (default: rabbitmq-system)
-  RABBITMQ_METRICS_PORT (default: 15692)
+  PROMETHEUS_HOST (default: prometheus.prometheus.svc.cluster.local)
+  PROMETHEUS_PORT (default: 9090)
 
-Output: JSON array of test results
+Output: JSON with resource analysis and recommendations
 """
 
 import os
@@ -36,8 +43,8 @@ def run_command(command: str, timeout: int = 30) -> Dict[str, Any]:
         return {"exit_code": 124, "stdout": "", "stderr": "Timeout"}
 
 
-def create_test_result(name: str, description: str, passed: bool, output: str, severity: str = "INFO") -> Dict[str, Any]:
-    """Create standardized test result"""
+def create_result(name: str, description: str, passed: bool, output: str, severity: str = "INFO") -> Dict[str, Any]:
+    """Create standardized result"""
     return {
         "name": name,
         "description": description,
@@ -47,242 +54,254 @@ def create_test_result(name: str, description: str, passed: bool, output: str, s
     }
 
 
-def get_service_metrics(namespace: str, service: str, port: int) -> Optional[str]:
-    """Get metrics from a service endpoint"""
-    cmd = f"curl -s --connect-timeout 5 --max-time 10 http://{service}.{namespace}.svc.cluster.local:{port}/metrics"
+def query_prometheus(query: str, prom_host: str, prom_port: int) -> Optional[List[Dict]]:
+    """Query Prometheus and return results"""
+    url = f"http://{prom_host}:{prom_port}/api/v1/query?query={query}"
+    cmd = f"curl -s '{url}'"
     result = run_command(cmd, timeout=15)
 
     if result["exit_code"] == 0 and result["stdout"]:
-        return result["stdout"]
+        try:
+            data = json.loads(result["stdout"])
+            if data.get("status") == "success":
+                return data.get("data", {}).get("result", [])
+        except json.JSONDecodeError:
+            pass
     return None
 
 
-def parse_metric_value(metrics_text: str, metric_name: str) -> List[float]:
-    """Extract values for a specific metric"""
-    values = []
-    for line in metrics_text.split('\n'):
-        if line.startswith(metric_name + ' ') and not line.startswith('#'):
-            parts = line.split()
-            if len(parts) >= 2:
-                try:
-                    values.append(float(parts[-1]))
-                except ValueError:
-                    pass
-    return values
+def get_pod_resources(namespace: str, label: str) -> Optional[Dict]:
+    """Get pod resource requests and limits"""
+    cmd = f"kubectl get pod -n {namespace} -l {label} -o json"
+    result = run_command(cmd)
+
+    if result["exit_code"] == 0 and result["stdout"]:
+        try:
+            data = json.loads(result["stdout"])
+            if data.get("items"):
+                pod = data["items"][0]
+                container = pod["spec"]["containers"][0]
+                return {
+                    "pod_name": pod["metadata"]["name"],
+                    "requests": container.get("resources", {}).get("requests", {}),
+                    "limits": container.get("resources", {}).get("limits", {})
+                }
+        except (json.JSONDecodeError, KeyError, IndexError):
+            pass
+    return None
 
 
-def count_metrics(metrics_text: str) -> int:
-    """Count unique metrics"""
-    metrics = set()
-    for line in metrics_text.split('\n'):
-        if line and not line.startswith('#'):
-            metric_name = line.split('{')[0].split()[0]
-            if metric_name:
-                metrics.add(metric_name)
-    return len(metrics)
+def get_pod_current_usage(namespace: str, pod_name: str) -> Optional[Dict]:
+    """Get current CPU and memory usage from kubectl top"""
+    cmd = f"kubectl top pod {pod_name} -n {namespace} --no-headers"
+    result = run_command(cmd)
+
+    if result["exit_code"] == 0 and result["stdout"]:
+        parts = result["stdout"].split()
+        if len(parts) >= 3:
+            return {
+                "cpu": parts[1],  # e.g., "25m"
+                "memory": parts[2]  # e.g., "128Mi"
+            }
+    return None
 
 
-def test_rabbitmq_metrics() -> List[Dict[str, Any]]:
-    """Analyze RabbitMQ metrics"""
+def parse_cpu(cpu_str: str) -> float:
+    """Parse CPU string to millicores"""
+    if not cpu_str:
+        return 0.0
+    if cpu_str.endswith('m'):
+        return float(cpu_str[:-1])
+    return float(cpu_str) * 1000
+
+
+def parse_memory(mem_str: str) -> float:
+    """Parse memory string to Mi"""
+    if not mem_str:
+        return 0.0
+    if mem_str.endswith('Ki'):
+        return float(mem_str[:-2]) / 1024
+    elif mem_str.endswith('Mi'):
+        return float(mem_str[:-2])
+    elif mem_str.endswith('Gi'):
+        return float(mem_str[:-2]) * 1024
+    return float(mem_str) / 1024 / 1024
+
+
+def analyze_rabbitmq_resources() -> List[Dict[str, Any]]:
+    """Analyze RabbitMQ resource usage and provide recommendations"""
     namespace = os.getenv("RABBITMQ_NS", "rabbitmq-system")
-    port = int(os.getenv("RABBITMQ_METRICS_PORT", "15692"))
-    service = "rabbitmq"
+    prom_host = os.getenv("PROMETHEUS_HOST", "prometheus.prometheus.svc.cluster.local")
+    prom_port = int(os.getenv("PROMETHEUS_PORT", "9090"))
 
     results = []
 
-    metrics_data = get_service_metrics(namespace, service, port)
-
-    if not metrics_data:
-        results.append(create_test_result(
-            "rabbitmq_metrics_availability",
-            "Check RabbitMQ metrics endpoint availability",
+    # Get pod configuration
+    pod_resources = get_pod_resources(namespace, "app.kubernetes.io/name=rabbitmq")
+    if not pod_resources:
+        results.append(create_result(
+            "rabbitmq_pod_discovery",
+            "Discover RabbitMQ pod configuration",
             False,
-            f"Failed to fetch metrics from {service}.{namespace}:{port}",
+            f"Failed to find RabbitMQ pod in namespace {namespace}",
             "CRITICAL"
         ))
         return results
 
-    metric_count = count_metrics(metrics_data)
-    results.append(create_test_result(
-        "rabbitmq_metrics_availability",
-        "Check RabbitMQ metrics endpoint availability",
+    pod_name = pod_resources["pod_name"]
+    requests = pod_resources["requests"]
+    limits = pod_resources["limits"]
+
+    results.append(create_result(
+        "rabbitmq_pod_discovery",
+        "Discover RabbitMQ pod configuration",
         True,
-        f"Successfully fetched {metric_count} unique metrics",
+        f"Found pod: {pod_name} | Requests: CPU={requests.get('cpu', 'N/A')}, Memory={requests.get('memory', 'N/A')} | Limits: CPU={limits.get('cpu', 'N/A')}, Memory={limits.get('memory', 'N/A')}",
         "INFO"
     ))
 
-    # Uptime - check if RabbitMQ is running
-    uptime = parse_metric_value(metrics_data, "rabbitmq_erlang_uptime_seconds")
-    if uptime:
-        uptime_hours = uptime[0] / 3600
-        results.append(create_test_result(
-            "rabbitmq_uptime",
-            "Check RabbitMQ uptime",
+    # Get current usage from kubectl top
+    current_usage = get_pod_current_usage(namespace, pod_name)
+    if current_usage:
+        cpu_current = parse_cpu(current_usage["cpu"])
+        mem_current = parse_memory(current_usage["memory"])
+
+        results.append(create_result(
+            "rabbitmq_current_usage",
+            "Check RabbitMQ current resource usage",
             True,
-            f"RabbitMQ running for {uptime_hours:.1f} hours",
+            f"Current usage: CPU={current_usage['cpu']} ({cpu_current}m), Memory={current_usage['memory']} ({mem_current:.1f}Mi)",
             "INFO"
         ))
-    else:
-        results.append(create_test_result(
-            "rabbitmq_uptime",
-            "Check RabbitMQ uptime",
-            False,
-            "Unable to determine uptime - service may be down",
-            "CRITICAL"
-        ))
-        return results
 
-    # Queue messages ready (unprocessed)
-    messages_ready = parse_metric_value(metrics_data, "rabbitmq_queue_messages_ready")
-    messages_unacked = parse_metric_value(metrics_data, "rabbitmq_queue_messages_unacked")
-
-    if messages_ready:
-        ready_count = int(sum(messages_ready))
-        unacked_count = int(sum(messages_unacked)) if messages_unacked else 0
-        total_messages = ready_count + unacked_count
-
-        # CRITICAL: Messages piling up with no consumers
-        has_problem = ready_count > 1000
-        results.append(create_test_result(
-            "rabbitmq_queue_messages",
-            "Check RabbitMQ queue backlog",
-            not has_problem,
-            f"{ready_count} ready, {unacked_count} unacked (total: {total_messages})",
-            "WARNING" if has_problem else "INFO"
-        ))
-
-    # Consumers - CRITICAL if messages but no consumers
-    consumers = parse_metric_value(metrics_data, "rabbitmq_queue_consumers")
-    if consumers:
-        total_consumers = int(sum(consumers))
-        has_messages = messages_ready and sum(messages_ready) > 0
-        no_consumers = total_consumers == 0
-
-        # Problem: messages waiting but no consumers to process them
-        if has_messages and no_consumers:
-            results.append(create_test_result(
-                "rabbitmq_consumers",
-                "Check RabbitMQ consumers",
-                False,
-                f"0 consumers but {int(sum(messages_ready))} messages waiting!",
-                "CRITICAL"
-            ))
+        # Compare with requests/limits
+        if "cpu" in requests:
+            cpu_request = parse_cpu(requests["cpu"])
+            cpu_usage_pct = (cpu_current / cpu_request * 100) if cpu_request > 0 else 0
         else:
-            results.append(create_test_result(
-                "rabbitmq_consumers",
-                "Check RabbitMQ consumers",
-                True,
-                f"{total_consumers} active consumers",
-                "INFO"
+            cpu_request = 0
+            cpu_usage_pct = 0
+
+        if "memory" in requests:
+            mem_request = parse_memory(requests["memory"])
+            mem_usage_pct = (mem_current / mem_request * 100) if mem_request > 0 else 0
+        else:
+            mem_request = 0
+            mem_usage_pct = 0
+
+        # CPU analysis
+        if cpu_request > 0:
+            if cpu_usage_pct > 80:
+                recommendation = f"INCREASE CPU request from {requests['cpu']} to {int(cpu_current * 1.5)}m"
+                severity = "WARNING"
+                passed = False
+            elif cpu_usage_pct < 20:
+                recommendation = f"DECREASE CPU request from {requests['cpu']} to {int(cpu_current * 2)}m"
+                severity = "INFO"
+                passed = True
+            else:
+                recommendation = "CPU request is appropriately sized"
+                severity = "INFO"
+                passed = True
+
+            results.append(create_result(
+                "rabbitmq_cpu_sizing",
+                "Analyze RabbitMQ CPU sizing",
+                passed,
+                f"CPU: {cpu_current:.1f}m / {cpu_request:.1f}m ({cpu_usage_pct:.1f}% utilized) | {recommendation}",
+                severity
             ))
 
-    # Connection churn - check if connections are flapping
-    conn_opened = parse_metric_value(metrics_data, "rabbitmq_connections_opened_total")
-    conn_closed = parse_metric_value(metrics_data, "rabbitmq_connections_closed_total")
-    if conn_opened and conn_closed:
-        opened = int(conn_opened[0])
-        closed = int(conn_closed[0])
-        # If connections are constantly opening/closing, that's a problem
-        if closed > 100:
-            results.append(create_test_result(
-                "rabbitmq_connection_stability",
-                "Check RabbitMQ connection stability",
+        # Memory analysis
+        if mem_request > 0:
+            if mem_usage_pct > 80:
+                recommendation = f"INCREASE memory request from {requests['memory']} to {int(mem_current * 1.5)}Mi"
+                severity = "WARNING"
+                passed = False
+            elif mem_usage_pct < 20:
+                recommendation = f"DECREASE memory request from {requests['memory']} to {int(mem_current * 2)}Mi"
+                severity = "INFO"
+                passed = True
+            else:
+                recommendation = "Memory request is appropriately sized"
+                severity = "INFO"
+                passed = True
+
+            results.append(create_result(
+                "rabbitmq_memory_sizing",
+                "Analyze RabbitMQ memory sizing",
+                passed,
+                f"Memory: {mem_current:.1f}Mi / {mem_request:.1f}Mi ({mem_usage_pct:.1f}% utilized) | {recommendation}",
+                severity
+            ))
+
+    # Query Prometheus for historical metrics (last hour average)
+    cpu_query = f'rate(container_cpu_usage_seconds_total{{namespace="{namespace}",pod=~"{pod_name}"}}[1h])'
+    cpu_results = query_prometheus(cpu_query, prom_host, prom_port)
+
+    if cpu_results:
+        # Convert to millicores (rate is in cores/second, multiply by 1000)
+        avg_cpu = sum([float(r["value"][1]) for r in cpu_results]) * 1000
+        results.append(create_result(
+            "rabbitmq_cpu_trend",
+            "Analyze RabbitMQ CPU trend (1 hour avg)",
+            True,
+            f"Average CPU usage over last hour: {avg_cpu:.1f}m",
+            "INFO"
+        ))
+
+    # Memory trend
+    mem_query = f'container_memory_working_set_bytes{{namespace="{namespace}",pod=~"{pod_name}"}}'
+    mem_results = query_prometheus(mem_query, prom_host, prom_port)
+
+    if mem_results:
+        avg_mem_bytes = sum([float(r["value"][1]) for r in mem_results]) / len(mem_results)
+        avg_mem_mi = avg_mem_bytes / 1024 / 1024
+        results.append(create_result(
+            "rabbitmq_memory_trend",
+            "Analyze RabbitMQ memory trend",
+            True,
+            f"Memory working set: {avg_mem_mi:.1f}Mi",
+            "INFO"
+        ))
+
+    # Queue depth analysis for scaling recommendations
+    queue_query = 'rabbitmq_queue_messages_ready'
+    queue_results = query_prometheus(queue_query, prom_host, prom_port)
+
+    if queue_results:
+        total_queued = sum([float(r["value"][1]) for r in queue_results])
+        if total_queued > 10000:
+            results.append(create_result(
+                "rabbitmq_scale_recommendation",
+                "RabbitMQ scaling recommendation based on queue depth",
                 False,
-                f"{closed} connections closed (possible connection flapping)",
+                f"HIGH queue backlog: {int(total_queued)} messages waiting | RECOMMENDATION: Scale up consumers or add RabbitMQ replicas",
                 "WARNING"
             ))
         else:
-            results.append(create_test_result(
-                "rabbitmq_connection_stability",
-                "Check RabbitMQ connection stability",
+            results.append(create_result(
+                "rabbitmq_scale_recommendation",
+                "RabbitMQ scaling recommendation based on queue depth",
                 True,
-                f"{opened} opened, {closed} closed",
+                f"Queue depth healthy: {int(total_queued)} messages",
                 "INFO"
             ))
-
-    # Memory usage - check against limit
-    memory = parse_metric_value(metrics_data, "rabbitmq_process_resident_memory_bytes")
-    memory_limit = parse_metric_value(metrics_data, "rabbitmq_resident_memory_limit_bytes")
-
-    if memory and memory_limit:
-        memory_mb = memory[0] / 1024 / 1024
-        limit_mb = memory_limit[0] / 1024 / 1024
-        memory_pct = (memory[0] / memory_limit[0]) * 100
-
-        # Warning if using >80% of memory limit
-        has_problem = memory_pct > 80
-        results.append(create_test_result(
-            "rabbitmq_memory_usage",
-            "Check RabbitMQ memory usage",
-            not has_problem,
-            f"Memory: {memory_mb:.1f}MB / {limit_mb:.1f}MB ({memory_pct:.1f}% used)",
-            "WARNING" if has_problem else "INFO"
-        ))
-
-    # Disk space - check against limit
-    disk_free = parse_metric_value(metrics_data, "rabbitmq_disk_space_available_bytes")
-    disk_limit = parse_metric_value(metrics_data, "rabbitmq_disk_space_available_limit_bytes")
-
-    if disk_free and disk_limit:
-        disk_gb = disk_free[0] / 1024 / 1024 / 1024
-        limit_gb = disk_limit[0] / 1024 / 1024 / 1024
-
-        # CRITICAL if below disk limit threshold
-        below_limit = disk_free[0] < disk_limit[0]
-        results.append(create_test_result(
-            "rabbitmq_disk_space",
-            "Check RabbitMQ disk space",
-            not below_limit,
-            f"Free: {disk_gb:.2f}GB (limit: {limit_gb:.2f}GB)" + (" - BELOW LIMIT!" if below_limit else ""),
-            "CRITICAL" if below_limit else "INFO"
-        ))
-
-    # File descriptors - check if running out
-    fds_used = parse_metric_value(metrics_data, "rabbitmq_process_open_fds")
-    fds_limit = parse_metric_value(metrics_data, "rabbitmq_process_max_fds")
-
-    if fds_used and fds_limit:
-        fds_pct = (fds_used[0] / fds_limit[0]) * 100
-        has_problem = fds_pct > 80
-
-        results.append(create_test_result(
-            "rabbitmq_file_descriptors",
-            "Check RabbitMQ file descriptor usage",
-            not has_problem,
-            f"{int(fds_used[0])}/{int(fds_limit[0])} FDs used ({fds_pct:.1f}%)",
-            "WARNING" if has_problem else "INFO"
-        ))
-
-    # Erlang processes
-    erlang_procs = parse_metric_value(metrics_data, "rabbitmq_erlang_processes_used")
-    erlang_limit = parse_metric_value(metrics_data, "rabbitmq_erlang_processes_limit")
-
-    if erlang_procs and erlang_limit:
-        proc_pct = (erlang_procs[0] / erlang_limit[0]) * 100
-        has_problem = proc_pct > 80
-
-        results.append(create_test_result(
-            "rabbitmq_erlang_processes",
-            "Check RabbitMQ Erlang process usage",
-            not has_problem,
-            f"{int(erlang_procs[0])}/{int(erlang_limit[0])} processes ({proc_pct:.1f}%)",
-            "WARNING" if has_problem else "INFO"
-        ))
 
     return results
 
 
 def test_rabbitmq() -> List[Dict[str, Any]]:
-    """Run all RabbitMQ metrics tests"""
-    all_results = test_rabbitmq_metrics()
+    """Run RabbitMQ resource analysis"""
+    all_results = analyze_rabbitmq_resources()
 
     # Summary
     total_checks = len(all_results)
     passed_checks = sum(1 for r in all_results if r["status"])
 
-    all_results.append(create_test_result(
-        "rabbitmq_summary",
-        "Overall RabbitMQ metrics summary",
+    all_results.append(create_result(
+        "rabbitmq_resources_summary",
+        "Overall RabbitMQ resource analysis summary",
         passed_checks >= total_checks * 0.7,
         f"{passed_checks}/{total_checks} checks passed ({passed_checks*100//total_checks if total_checks > 0 else 0}%)",
         "INFO" if passed_checks >= total_checks * 0.7 else "WARNING"
@@ -300,7 +319,7 @@ if __name__ == "__main__":
         sys.exit(1 if critical_failures > 0 else 0)
 
     except Exception as e:
-        error_result = [create_test_result(
+        error_result = [create_result(
             "test_execution_error",
             "Test execution failed",
             False,
