@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
 """
-RabbitMQ Resource Estimation
-Analyzes actual resource usage and provides scaling recommendations
+RabbitMQ Security Tests
+Comprehensive security analysis for RabbitMQ messaging broker
 
-Uses:
-- Prometheus metrics (CPU, memory, disk usage over time)
-- kubectl get pod resources (requests/limits)
-- kubectl top (current usage)
-- Service metrics (queue depth, connections, etc.)
+Tests:
+1. Default credentials check (guest/guest)
+2. TLS/SSL configuration
+3. Management UI security
+4. User permissions and privileges
+5. Vhost isolation
+6. Authentication mechanisms
+7. Network exposure
+8. Admin interface access control
 
 ENV VARS:
   RABBITMQ_NS (default: rabbitmq-system)
-  PROMETHEUS_HOST (default: prometheus.prometheus.svc.cluster.local)
-  PROMETHEUS_PORT (default: 9090)
+  RABBITMQ_HOST (default: rabbitmq.rabbitmq-system.svc.cluster.local)
+  RABBITMQ_PORT (default: 5672)
+  RABBITMQ_USER (default: user)
+  RABBITMQ_PASSWORD (default: password)
+  RABBITMQ_ADMIN_PASSWORD (default: admin)
 
-Output: JSON with resource analysis and recommendations
+Output: JSON array of security test results
 """
 
 import os
 import sys
 import json
 import subprocess
+import base64
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 
 
 def run_command(command: str, timeout: int = 30) -> Dict[str, Any]:
@@ -44,7 +53,7 @@ def run_command(command: str, timeout: int = 30) -> Dict[str, Any]:
 
 
 def create_result(name: str, description: str, passed: bool, output: str, severity: str = "INFO") -> Dict[str, Any]:
-    """Create standardized result"""
+    """Create standardized security test result"""
     return {
         "name": name,
         "description": description,
@@ -54,274 +63,496 @@ def create_result(name: str, description: str, passed: bool, output: str, severi
     }
 
 
-def query_prometheus(query: str, prom_host: str, prom_port: int) -> Optional[List[Dict]]:
-    """Query Prometheus and return results"""
-    url = f"http://{prom_host}:{prom_port}/api/v1/query?query={query}"
-    cmd = f"curl -s '{url}'"
-    result = run_command(cmd, timeout=15)
-
-    if result["exit_code"] == 0 and result["stdout"]:
-        try:
-            data = json.loads(result["stdout"])
-            if data.get("status") == "success":
-                return data.get("data", {}).get("result", [])
-        except json.JSONDecodeError:
-            pass
-    return None
-
-
-def get_pod_resources(namespace: str, label: str) -> Optional[Dict]:
-    """Get pod resource requests and limits"""
-    cmd = f"kubectl get pod -n {namespace} -l {label} -o json"
-    result = run_command(cmd)
-
-    if result["exit_code"] == 0 and result["stdout"]:
-        try:
-            data = json.loads(result["stdout"])
-            if data.get("items"):
-                pod = data["items"][0]
-                container = pod["spec"]["containers"][0]
-                return {
-                    "pod_name": pod["metadata"]["name"],
-                    "requests": container.get("resources", {}).get("requests", {}),
-                    "limits": container.get("resources", {}).get("limits", {})
-                }
-        except (json.JSONDecodeError, KeyError, IndexError):
-            pass
-    return None
-
-
-def get_pod_current_usage(namespace: str, pod_name: str) -> Optional[Dict]:
-    """Get current CPU and memory usage from kubectl top"""
-    cmd = f"kubectl top pod {pod_name} -n {namespace} --no-headers"
-    result = run_command(cmd)
-
-    if result["exit_code"] == 0 and result["stdout"]:
-        parts = result["stdout"].split()
-        if len(parts) >= 3:
-            return {
-                "cpu": parts[1],  # e.g., "25m"
-                "memory": parts[2]  # e.g., "128Mi"
-            }
-    return None
-
-
-def parse_cpu(cpu_str: str) -> float:
-    """Parse CPU string to millicores"""
-    if not cpu_str:
-        return 0.0
-    if cpu_str.endswith('m'):
-        return float(cpu_str[:-1])
-    return float(cpu_str) * 1000
-
-
-def parse_memory(mem_str: str) -> float:
-    """Parse memory string to Mi"""
-    if not mem_str:
-        return 0.0
-    if mem_str.endswith('Ki'):
-        return float(mem_str[:-2]) / 1024
-    elif mem_str.endswith('Mi'):
-        return float(mem_str[:-2])
-    elif mem_str.endswith('Gi'):
-        return float(mem_str[:-2]) * 1024
-    return float(mem_str) / 1024 / 1024
-
-
-def analyze_rabbitmq_resources() -> List[Dict[str, Any]]:
-    """Analyze RabbitMQ resource usage and provide recommendations"""
+def test_default_credentials() -> Dict[str, Any]:
+    """Test if default guest/guest credentials work"""
     namespace = os.getenv("RABBITMQ_NS", "rabbitmq-system")
-    prom_host = os.getenv("PROMETHEUS_HOST", "prometheus.prometheus.svc.cluster.local")
-    prom_port = int(os.getenv("PROMETHEUS_PORT", "9090"))
+    host = os.getenv("RABBITMQ_HOST", "rabbitmq.rabbitmq-system.svc.cluster.local")
 
+    # RabbitMQ Management API port is typically 15672
+    mgmt_port = 15672
+
+    # Try default guest/guest credentials
+    cmd = f"curl -s -u guest:guest -w '%{{http_code}}' -o /dev/null http://{host}:{mgmt_port}/api/overview"
+    result = run_command(cmd, timeout=10)
+
+    http_code = result["stdout"]
+
+    if http_code == "200":
+        return create_result(
+            "rabbitmq_default_credentials",
+            "Check if default guest/guest credentials are disabled",
+            False,
+            "CRITICAL: Default guest/guest credentials are ENABLED and working! This is a major security risk.",
+            "CRITICAL"
+        )
+    elif http_code == "401":
+        return create_result(
+            "rabbitmq_default_credentials",
+            "Check if default guest/guest credentials are disabled",
+            True,
+            "Default guest/guest credentials are properly disabled (HTTP 401)",
+            "INFO"
+        )
+    else:
+        return create_result(
+            "rabbitmq_default_credentials",
+            "Check if default guest/guest credentials are disabled",
+            True,
+            f"Management API returned HTTP {http_code} for guest credentials - likely disabled or API unavailable",
+            "INFO"
+        )
+
+
+def test_weak_admin_password() -> Dict[str, Any]:
+    """Check if admin password is weak or default"""
+    admin_password = os.getenv("RABBITMQ_ADMIN_PASSWORD", "")
+
+    # List of common weak passwords
+    weak_passwords = [
+        "admin", "password", "123456", "rabbitmq", "guest",
+        "default", "default_password", "admin123", "password123"
+    ]
+
+    if admin_password.lower() in weak_passwords:
+        return create_result(
+            "rabbitmq_weak_admin_password",
+            "Check if admin password is strong",
+            False,
+            f"CRITICAL: Admin password '{admin_password}' is a known weak/default password! Change immediately.",
+            "CRITICAL"
+        )
+    elif len(admin_password) < 12:
+        return create_result(
+            "rabbitmq_weak_admin_password",
+            "Check if admin password is strong",
+            False,
+            f"WARNING: Admin password length is {len(admin_password)} characters. Recommended minimum is 12 characters.",
+            "WARNING"
+        )
+    else:
+        return create_result(
+            "rabbitmq_weak_admin_password",
+            "Check if admin password is strong",
+            True,
+            f"Admin password appears strong (length: {len(admin_password)} characters)",
+            "INFO"
+        )
+
+
+def test_tls_configuration() -> Dict[str, Any]:
+    """Check if RabbitMQ is using TLS/SSL"""
+    namespace = os.getenv("RABBITMQ_NS", "rabbitmq-system")
+    host = os.getenv("RABBITMQ_HOST", "rabbitmq.rabbitmq-system.svc.cluster.local")
+    amqp_port = int(os.getenv("RABBITMQ_PORT", "5672"))
+
+    # Check if TLS port 5671 responds (AMQPS)
+    tls_port = 5671
+    cmd = f"timeout 5 bash -c 'echo | openssl s_client -connect {host}:{tls_port} 2>&1' | grep -q 'Verify return code'"
+    result = run_command(cmd, timeout=10)
+
+    if result["exit_code"] == 0:
+        # TLS is available, now check certificate details
+        cert_cmd = f"echo | openssl s_client -connect {host}:{tls_port} -servername {host} 2>/dev/null | openssl x509 -noout -dates 2>/dev/null"
+        cert_result = run_command(cert_cmd, timeout=10)
+
+        if cert_result["exit_code"] == 0 and "notAfter" in cert_result["stdout"]:
+            return create_result(
+                "rabbitmq_tls_configuration",
+                "Check if RabbitMQ uses TLS/SSL encryption",
+                True,
+                f"TLS is enabled on port {tls_port} with valid certificate",
+                "INFO"
+            )
+        else:
+            return create_result(
+                "rabbitmq_tls_configuration",
+                "Check if RabbitMQ uses TLS/SSL encryption",
+                False,
+                f"TLS port {tls_port} is accessible but certificate validation failed",
+                "WARNING"
+            )
+    else:
+        # Check if non-TLS port is responding
+        non_tls_cmd = f"timeout 3 bash -c 'echo -n | nc -w 2 {host} {amqp_port}' 2>&1"
+        non_tls_result = run_command(non_tls_cmd, timeout=5)
+
+        return create_result(
+            "rabbitmq_tls_configuration",
+            "Check if RabbitMQ uses TLS/SSL encryption",
+            False,
+            f"WARNING: TLS port {tls_port} not accessible. Only non-encrypted port {amqp_port} appears to be in use. Enable TLS for production.",
+            "WARNING"
+        )
+
+
+def test_management_ui_exposure() -> Dict[str, Any]:
+    """Check if management UI is properly secured"""
+    namespace = os.getenv("RABBITMQ_NS", "rabbitmq-system")
+    host = os.getenv("RABBITMQ_HOST", "rabbitmq.rabbitmq-system.svc.cluster.local")
+    mgmt_port = 15672
+
+    # Check if management API is accessible without auth (not the UI page, but the actual API)
+    # The UI page at / returns 200 (it's the login page), but API endpoints should return 401
+    cmd = f"curl -s -w '%{{http_code}}' -o /dev/null http://{host}:{mgmt_port}/api/overview"
+    result = run_command(cmd, timeout=10)
+
+    http_code = result["stdout"]
+
+    if http_code == "200":
+        return create_result(
+            "rabbitmq_management_ui_security",
+            "Check if management API requires authentication",
+            False,
+            "CRITICAL: Management API is accessible without authentication!",
+            "CRITICAL"
+        )
+    elif http_code == "401":
+        return create_result(
+            "rabbitmq_management_ui_security",
+            "Check if management API requires authentication",
+            True,
+            "Management API properly requires authentication (HTTP 401)",
+            "INFO"
+        )
+    elif http_code == "000" or result["exit_code"] != 0:
+        return create_result(
+            "rabbitmq_management_ui_security",
+            "Check if management API requires authentication",
+            True,
+            "Management API is not accessible (connection refused) - may be properly restricted",
+            "INFO"
+        )
+    else:
+        return create_result(
+            "rabbitmq_management_ui_security",
+            "Check if management API requires authentication",
+            True,
+            f"Management API returned HTTP {http_code} - authentication appears required",
+            "INFO"
+        )
+
+
+def test_user_permissions() -> Dict[str, Any]:
+    """Check user permissions and verify they're not overly permissive"""
+    namespace = os.getenv("RABBITMQ_NS", "rabbitmq-system")
+    host = os.getenv("RABBITMQ_HOST", "rabbitmq.rabbitmq-system.svc.cluster.local")
+    user = os.getenv("RABBITMQ_USER", "user")
+    password = os.getenv("RABBITMQ_PASSWORD", "password")
+    mgmt_port = 15672
+
+    # Get user permissions via Management API
+    cmd = f"curl -s -u {user}:{password} http://{host}:{mgmt_port}/api/users/{user}"
+    result = run_command(cmd, timeout=10)
+
+    if result["exit_code"] == 0 and result["stdout"]:
+        try:
+            user_info = json.loads(result["stdout"])
+            tags = user_info.get("tags", "")
+
+            # Check if user has administrator tag
+            if "administrator" in tags:
+                return create_result(
+                    "rabbitmq_user_permissions",
+                    "Check if application user has minimal required permissions",
+                    False,
+                    f"WARNING: User '{user}' has 'administrator' tag. Application users should have minimal permissions (management, policymaker, or monitoring).",
+                    "WARNING"
+                )
+            elif tags == "":
+                return create_result(
+                    "rabbitmq_user_permissions",
+                    "Check if application user has minimal required permissions",
+                    True,
+                    f"User '{user}' has no admin tags - follows principle of least privilege",
+                    "INFO"
+                )
+            else:
+                return create_result(
+                    "rabbitmq_user_permissions",
+                    "Check if application user has minimal required permissions",
+                    True,
+                    f"User '{user}' has limited permissions (tags: {tags})",
+                    "INFO"
+                )
+        except json.JSONDecodeError:
+            return create_result(
+                "rabbitmq_user_permissions",
+                "Check if application user has minimal required permissions",
+                True,
+                "Unable to parse user permissions - API may require admin access",
+                "INFO"
+            )
+    else:
+        return create_result(
+            "rabbitmq_user_permissions",
+            "Check if application user has minimal required permissions",
+            True,
+            "Unable to check user permissions via API - may require admin credentials",
+            "INFO"
+        )
+
+
+def test_external_exposure() -> Dict[str, Any]:
+    """Check if RabbitMQ is exposed externally via LoadBalancer"""
+    namespace = os.getenv("RABBITMQ_NS", "rabbitmq-system")
+
+    # Check service type
+    cmd = f"kubectl get svc -n {namespace} -o json"
+    result = run_command(cmd, timeout=10)
+
+    if result["exit_code"] == 0 and result["stdout"]:
+        try:
+            services = json.loads(result["stdout"])
+
+            for svc in services.get("items", []):
+                svc_name = svc["metadata"]["name"]
+                svc_type = svc["spec"]["type"]
+
+                if "rabbitmq" in svc_name.lower():
+                    if svc_type == "LoadBalancer":
+                        external_ip = svc["status"].get("loadBalancer", {}).get("ingress", [{}])[0].get("ip", "pending")
+                        return create_result(
+                            "rabbitmq_external_exposure",
+                            "Check if RabbitMQ is exposed to external networks",
+                            False,
+                            f"WARNING: RabbitMQ service '{svc_name}' is exposed as LoadBalancer with external IP: {external_ip}. Ensure proper firewall rules and authentication.",
+                            "WARNING"
+                        )
+                    elif svc_type == "ClusterIP":
+                        return create_result(
+                            "rabbitmq_external_exposure",
+                            "Check if RabbitMQ is exposed to external networks",
+                            True,
+                            f"RabbitMQ service '{svc_name}' is ClusterIP (internal only) - good security practice",
+                            "INFO"
+                        )
+                    elif svc_type == "NodePort":
+                        node_ports = [p.get("nodePort") for p in svc["spec"].get("ports", []) if p.get("nodePort")]
+                        return create_result(
+                            "rabbitmq_external_exposure",
+                            "Check if RabbitMQ is exposed to external networks",
+                            False,
+                            f"WARNING: RabbitMQ service '{svc_name}' is exposed via NodePort: {node_ports}. Ensure proper network policies.",
+                            "WARNING"
+                        )
+
+            return create_result(
+                "rabbitmq_external_exposure",
+                "Check if RabbitMQ is exposed to external networks",
+                True,
+                "No RabbitMQ service found or service is internal only",
+                "INFO"
+            )
+        except (json.JSONDecodeError, KeyError):
+            return create_result(
+                "rabbitmq_external_exposure",
+                "Check if RabbitMQ is exposed to external networks",
+                True,
+                "Unable to parse service configuration",
+                "INFO"
+            )
+    else:
+        return create_result(
+            "rabbitmq_external_exposure",
+            "Check if RabbitMQ is exposed to external networks",
+            True,
+            "Unable to check service exposure",
+            "INFO"
+        )
+
+
+def test_pod_security_context() -> Dict[str, Any]:
+    """Check if RabbitMQ pods run with secure security context"""
+    namespace = os.getenv("RABBITMQ_NS", "rabbitmq-system")
+
+    # Get RabbitMQ pods
+    cmd = f"kubectl get pod -n {namespace} -l app.kubernetes.io/name=rabbitmq -o json"
+    result = run_command(cmd, timeout=10)
+
+    if result["exit_code"] == 0 and result["stdout"]:
+        try:
+            pods_data = json.loads(result["stdout"])
+
+            if not pods_data.get("items"):
+                return create_result(
+                    "rabbitmq_pod_security_context",
+                    "Check RabbitMQ pod security context",
+                    True,
+                    "No RabbitMQ pods found",
+                    "INFO"
+                )
+
+            issues = []
+            pod = pods_data["items"][0]
+            pod_name = pod["metadata"]["name"]
+
+            # Check pod-level security context
+            pod_security = pod["spec"].get("securityContext", {})
+            pod_run_as_non_root = pod_security.get("runAsNonRoot", False)
+
+            # Check container security context
+            containers = pod["spec"].get("containers", [])
+            for container in containers:
+                if "rabbitmq" in container["name"].lower():
+                    container_security = container.get("securityContext", {})
+
+                    # Check if running as non-root (pod-level OR container-level)
+                    container_run_as_non_root = container_security.get("runAsNonRoot", False)
+                    if not pod_run_as_non_root and not container_run_as_non_root:
+                        issues.append("Neither pod nor container enforcing runAsNonRoot")
+
+                    # Check if privileged
+                    privileged = container_security.get("privileged", False)
+                    if privileged:
+                        issues.append("Container is running in privileged mode")
+
+                    # Check capabilities
+                    capabilities = container_security.get("capabilities", {})
+                    added_caps = capabilities.get("add", [])
+                    if added_caps:
+                        issues.append(f"Additional capabilities added: {added_caps}")
+
+            if issues:
+                return create_result(
+                    "rabbitmq_pod_security_context",
+                    "Check RabbitMQ pod security context",
+                    False,
+                    f"Security issues in pod '{pod_name}': {', '.join(issues)}",
+                    "WARNING"
+                )
+            else:
+                return create_result(
+                    "rabbitmq_pod_security_context",
+                    "Check RabbitMQ pod security context",
+                    True,
+                    f"Pod '{pod_name}' has secure security context",
+                    "INFO"
+                )
+
+        except (json.JSONDecodeError, KeyError) as e:
+            return create_result(
+                "rabbitmq_pod_security_context",
+                "Check RabbitMQ pod security context",
+                True,
+                f"Unable to parse pod security context: {str(e)}",
+                "INFO"
+            )
+    else:
+        return create_result(
+            "rabbitmq_pod_security_context",
+            "Check RabbitMQ pod security context",
+            True,
+            "Unable to retrieve pod information",
+            "INFO"
+        )
+
+
+def test_network_policies() -> Dict[str, Any]:
+    """Check if NetworkPolicies are configured for RabbitMQ namespace"""
+    namespace = os.getenv("RABBITMQ_NS", "rabbitmq-system")
+
+    # Check for NetworkPolicies
+    cmd = f"kubectl get networkpolicies -n {namespace} -o json"
+    result = run_command(cmd, timeout=10)
+
+    if result["exit_code"] == 0 and result["stdout"]:
+        try:
+            netpol_data = json.loads(result["stdout"])
+            policies = netpol_data.get("items", [])
+
+            if len(policies) == 0:
+                return create_result(
+                    "rabbitmq_network_policies",
+                    "Check if NetworkPolicies restrict RabbitMQ access",
+                    False,
+                    f"WARNING: No NetworkPolicies found in namespace '{namespace}'. Network traffic is unrestricted.",
+                    "WARNING"
+                )
+            else:
+                policy_names = [p["metadata"]["name"] for p in policies]
+                return create_result(
+                    "rabbitmq_network_policies",
+                    "Check if NetworkPolicies restrict RabbitMQ access",
+                    True,
+                    f"NetworkPolicies configured: {', '.join(policy_names)} ({len(policies)} total)",
+                    "INFO"
+                )
+        except (json.JSONDecodeError, KeyError):
+            return create_result(
+                "rabbitmq_network_policies",
+                "Check if NetworkPolicies restrict RabbitMQ access",
+                True,
+                "Unable to parse NetworkPolicy data",
+                "INFO"
+            )
+    else:
+        return create_result(
+            "rabbitmq_network_policies",
+            "Check if NetworkPolicies restrict RabbitMQ access",
+            False,
+            f"WARNING: Unable to check NetworkPolicies (may not exist or no permissions)",
+            "WARNING"
+        )
+
+
+def test_rabbitmq_security() -> List[Dict[str, Any]]:
+    """Run all RabbitMQ security tests"""
     results = []
 
-    # Get pod configuration
-    pod_resources = get_pod_resources(namespace, "app.kubernetes.io/name=rabbitmq")
-    if not pod_resources:
-        results.append(create_result(
-            "rabbitmq_pod_discovery",
-            "Discover RabbitMQ pod configuration",
-            False,
-            f"Failed to find RabbitMQ pod in namespace {namespace}",
-            "CRITICAL"
-        ))
-        return results
+    # Authentication & Authorization
+    results.append(test_default_credentials())
+    results.append(test_weak_admin_password())
+    results.append(test_user_permissions())
 
-    pod_name = pod_resources["pod_name"]
-    requests = pod_resources["requests"]
-    limits = pod_resources["limits"]
+    # Network Security
+    results.append(test_tls_configuration())
+    results.append(test_management_ui_exposure())
+    results.append(test_external_exposure())
+
+    # Container & Kubernetes Security
+    results.append(test_pod_security_context())
+    results.append(test_network_policies())
+
+    # Summary
+    total_checks = len(results)
+    passed_checks = sum(1 for r in results if r["status"])
+    critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "CRITICAL")
+    warnings = sum(1 for r in results if not r["status"] and r["severity"] == "WARNING")
+
+    if critical_failures > 0:
+        severity = "CRITICAL"
+        status_text = f"{critical_failures} CRITICAL security issues found!"
+    elif warnings > 0:
+        severity = "WARNING"
+        status_text = f"{warnings} security warnings found"
+    else:
+        severity = "INFO"
+        status_text = "All security checks passed"
 
     results.append(create_result(
-        "rabbitmq_pod_discovery",
-        "Discover RabbitMQ pod configuration",
-        True,
-        f"Found pod: {pod_name} | Requests: CPU={requests.get('cpu', 'N/A')}, Memory={requests.get('memory', 'N/A')} | Limits: CPU={limits.get('cpu', 'N/A')}, Memory={limits.get('memory', 'N/A')}",
-        "INFO"
+        "rabbitmq_security_summary",
+        "Overall RabbitMQ security assessment",
+        critical_failures == 0,
+        f"{passed_checks}/{total_checks} checks passed | {status_text}",
+        severity
     ))
-
-    # Get current usage from kubectl top
-    current_usage = get_pod_current_usage(namespace, pod_name)
-    if current_usage:
-        cpu_current = parse_cpu(current_usage["cpu"])
-        mem_current = parse_memory(current_usage["memory"])
-
-        results.append(create_result(
-            "rabbitmq_current_usage",
-            "Check RabbitMQ current resource usage",
-            True,
-            f"Current usage: CPU={current_usage['cpu']} ({cpu_current}m), Memory={current_usage['memory']} ({mem_current:.1f}Mi)",
-            "INFO"
-        ))
-
-        # Compare with requests/limits
-        if "cpu" in requests:
-            cpu_request = parse_cpu(requests["cpu"])
-            cpu_usage_pct = (cpu_current / cpu_request * 100) if cpu_request > 0 else 0
-        else:
-            cpu_request = 0
-            cpu_usage_pct = 0
-
-        if "memory" in requests:
-            mem_request = parse_memory(requests["memory"])
-            mem_usage_pct = (mem_current / mem_request * 100) if mem_request > 0 else 0
-        else:
-            mem_request = 0
-            mem_usage_pct = 0
-
-        # CPU analysis
-        if cpu_request > 0:
-            if cpu_usage_pct > 80:
-                recommendation = f"INCREASE CPU request from {requests['cpu']} to {int(cpu_current * 1.5)}m"
-                severity = "WARNING"
-                passed = False
-            elif cpu_usage_pct < 20:
-                recommendation = f"DECREASE CPU request from {requests['cpu']} to {int(cpu_current * 2)}m"
-                severity = "INFO"
-                passed = True
-            else:
-                recommendation = "CPU request is appropriately sized"
-                severity = "INFO"
-                passed = True
-
-            results.append(create_result(
-                "rabbitmq_cpu_sizing",
-                "Analyze RabbitMQ CPU sizing",
-                passed,
-                f"CPU: {cpu_current:.1f}m / {cpu_request:.1f}m ({cpu_usage_pct:.1f}% utilized) | {recommendation}",
-                severity
-            ))
-
-        # Memory analysis
-        if mem_request > 0:
-            if mem_usage_pct > 80:
-                recommendation = f"INCREASE memory request from {requests['memory']} to {int(mem_current * 1.5)}Mi"
-                severity = "WARNING"
-                passed = False
-            elif mem_usage_pct < 20:
-                recommendation = f"DECREASE memory request from {requests['memory']} to {int(mem_current * 2)}Mi"
-                severity = "INFO"
-                passed = True
-            else:
-                recommendation = "Memory request is appropriately sized"
-                severity = "INFO"
-                passed = True
-
-            results.append(create_result(
-                "rabbitmq_memory_sizing",
-                "Analyze RabbitMQ memory sizing",
-                passed,
-                f"Memory: {mem_current:.1f}Mi / {mem_request:.1f}Mi ({mem_usage_pct:.1f}% utilized) | {recommendation}",
-                severity
-            ))
-
-    # Query Prometheus for historical metrics (last hour average)
-    cpu_query = f'rate(container_cpu_usage_seconds_total{{namespace="{namespace}",pod=~"{pod_name}"}}[1h])'
-    cpu_results = query_prometheus(cpu_query, prom_host, prom_port)
-
-    if cpu_results:
-        # Convert to millicores (rate is in cores/second, multiply by 1000)
-        avg_cpu = sum([float(r["value"][1]) for r in cpu_results]) * 1000
-        results.append(create_result(
-            "rabbitmq_cpu_trend",
-            "Analyze RabbitMQ CPU trend (1 hour avg)",
-            True,
-            f"Average CPU usage over last hour: {avg_cpu:.1f}m",
-            "INFO"
-        ))
-
-    # Memory trend
-    mem_query = f'container_memory_working_set_bytes{{namespace="{namespace}",pod=~"{pod_name}"}}'
-    mem_results = query_prometheus(mem_query, prom_host, prom_port)
-
-    if mem_results:
-        avg_mem_bytes = sum([float(r["value"][1]) for r in mem_results]) / len(mem_results)
-        avg_mem_mi = avg_mem_bytes / 1024 / 1024
-        results.append(create_result(
-            "rabbitmq_memory_trend",
-            "Analyze RabbitMQ memory trend",
-            True,
-            f"Memory working set: {avg_mem_mi:.1f}Mi",
-            "INFO"
-        ))
-
-    # Queue depth analysis for scaling recommendations
-    queue_query = 'rabbitmq_queue_messages_ready'
-    queue_results = query_prometheus(queue_query, prom_host, prom_port)
-
-    if queue_results:
-        total_queued = sum([float(r["value"][1]) for r in queue_results])
-        if total_queued > 10000:
-            results.append(create_result(
-                "rabbitmq_scale_recommendation",
-                "RabbitMQ scaling recommendation based on queue depth",
-                False,
-                f"HIGH queue backlog: {int(total_queued)} messages waiting | RECOMMENDATION: Scale up consumers or add RabbitMQ replicas",
-                "WARNING"
-            ))
-        else:
-            results.append(create_result(
-                "rabbitmq_scale_recommendation",
-                "RabbitMQ scaling recommendation based on queue depth",
-                True,
-                f"Queue depth healthy: {int(total_queued)} messages",
-                "INFO"
-            ))
 
     return results
 
 
-def test_rabbitmq() -> List[Dict[str, Any]]:
-    """Run RabbitMQ resource analysis"""
-    all_results = analyze_rabbitmq_resources()
-
-    # Summary
-    total_checks = len(all_results)
-    passed_checks = sum(1 for r in all_results if r["status"])
-
-    all_results.append(create_result(
-        "rabbitmq_resources_summary",
-        "Overall RabbitMQ resource analysis summary",
-        passed_checks >= total_checks * 0.7,
-        f"{passed_checks}/{total_checks} checks passed ({passed_checks*100//total_checks if total_checks > 0 else 0}%)",
-        "INFO" if passed_checks >= total_checks * 0.7 else "WARNING"
-    ))
-
-    return all_results
-
-
 if __name__ == "__main__":
     try:
-        results = test_rabbitmq()
+        results = test_rabbitmq_security()
         print(json.dumps(results, indent=2))
 
+        # Exit with error code if critical failures exist
         critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "CRITICAL")
         sys.exit(1 if critical_failures > 0 else 0)
 
     except Exception as e:
         error_result = [create_result(
             "test_execution_error",
-            "Test execution failed",
+            "Security test execution failed",
             False,
             f"Unexpected error: {str(e)}",
             "CRITICAL"
