@@ -748,7 +748,8 @@ def check_rbac_destructive_permissions() -> Dict[str, Any]:
     )
 
 
-def test_fastapi_security() -> List[Dict[str, Any]]:
+def test_fastapi() -> List[Dict[str, Any]]:
+    """Run all fastapi security tests"""
     """Run all FastAPI security tests"""
     results = []
 
@@ -799,15 +800,9 @@ def test_fastapi_security() -> List[Dict[str, Any]]:
     return results
 
 
-# Alias for UI compatibility - the UI expects test_fastapi() not test_fastapi_security()
-def test_fastapi() -> List[Dict[str, Any]]:
-    """Alias for test_fastapi_security() for UI compatibility"""
-    return test_fastapi_security()
-
-
 if __name__ == "__main__":
     try:
-        results = test_fastapi_security()
+        results = test_fastapi()
         print(json.dumps(results, indent=2))
 
         # Exit with error code if critical failures exist

@@ -146,7 +146,7 @@ def check_write_endpoint_protection() -> Dict[str, Any]:
         )
 
 
-def test_admin_api_security() -> Dict[str, Any]:
+def check_admin_api_security() -> Dict[str, Any]:
     """Check if admin API endpoints are protected"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
     host = os.getenv("PROMETHEUS_HOST", "prometheus.prometheus.svc.cluster.local")
@@ -726,14 +726,15 @@ def check_rbac_destructive_permissions() -> Dict[str, Any]:
     )
 
 
-def test_prometheus_security() -> List[Dict[str, Any]]:
+def test_prometheus() -> List[Dict[str, Any]]:
+    """Run all prometheus security tests"""
     """Run all Prometheus security tests"""
     results = []
 
     # API Security
     results.append(check_api_authentication())
     results.append(check_write_endpoint_protection())
-    results.append(test_admin_api_security())
+    results.append(check_admin_api_security())
     results.append(check_alertmanager_authentication())
 
     # Network Security
@@ -779,15 +780,9 @@ def test_prometheus_security() -> List[Dict[str, Any]]:
     return results
 
 
-# Alias for UI compatibility - the UI expects test_prometheus() not test_prometheus_security()
-def test_prometheus() -> List[Dict[str, Any]]:
-    """Alias for test_prometheus_security() for UI compatibility"""
-    return test_prometheus_security()
-
-
 if __name__ == "__main__":
     try:
-        results = test_prometheus_security()
+        results = test_prometheus()
         print(json.dumps(results, indent=2))
 
         # Exit with error code if critical failures exist

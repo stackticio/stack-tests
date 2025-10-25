@@ -149,7 +149,7 @@ def check_default_admin_key() -> Dict[str, Any]:
         )
 
 
-def test_etcd_security() -> Dict[str, Any]:
+def check_etcd_security() -> Dict[str, Any]:
     """Check ETCD security configuration"""
     namespace = os.getenv("APISIX_NS", "ingress-apisix")
 
@@ -687,7 +687,8 @@ def check_rbac_destructive_permissions() -> Dict[str, Any]:
     )
 
 
-def test_apisix_security() -> List[Dict[str, Any]]:
+def test_apisix() -> List[Dict[str, Any]]:
+    """Run all apisix security tests"""
     """Run all APISIX security tests"""
     results = []
 
@@ -698,7 +699,7 @@ def test_apisix_security() -> List[Dict[str, Any]]:
     results.append(check_ssl_configuration())
 
     # Infrastructure Security
-    results.append(test_etcd_security())
+    results.append(check_etcd_security())
     results.append(check_external_exposure())
 
     # Container & Kubernetes Security
@@ -737,15 +738,9 @@ def test_apisix_security() -> List[Dict[str, Any]]:
     return results
 
 
-# Alias for UI compatibility - the UI expects test_apisix() not test_apisix_security()
-def test_apisix() -> List[Dict[str, Any]]:
-    """Alias for test_apisix_security() for UI compatibility"""
-    return test_apisix_security()
-
-
 if __name__ == "__main__":
     try:
-        results = test_apisix_security()
+        results = test_apisix()
         print(json.dumps(results, indent=2))
 
         critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "CRITICAL")

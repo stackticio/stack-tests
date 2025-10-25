@@ -642,7 +642,8 @@ def check_rbac_destructive_permissions() -> Dict[str, Any]:
     )
 
 
-def test_rabbitmq_security() -> List[Dict[str, Any]]:
+def test_rabbitmq() -> List[Dict[str, Any]]:
+    """Run all rabbitmq security tests"""
     """Run all RabbitMQ security tests"""
     results = []
 
@@ -692,15 +693,9 @@ def test_rabbitmq_security() -> List[Dict[str, Any]]:
     return results
 
 
-# Alias for UI compatibility - the UI expects test_rabbitmq() not test_rabbitmq_security()
-def test_rabbitmq() -> List[Dict[str, Any]]:
-    """Alias for test_rabbitmq_security() for UI compatibility"""
-    return test_rabbitmq_security()
-
-
 if __name__ == "__main__":
     try:
-        results = test_rabbitmq_security()
+        results = test_rabbitmq()
         print(json.dumps(results, indent=2))
 
         # Exit with error code if critical failures exist

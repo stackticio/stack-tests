@@ -142,7 +142,7 @@ def check_certificate_expiration() -> Dict[str, Any]:
         )
 
 
-def test_webhook_security() -> Dict[str, Any]:
+def check_webhook_security() -> Dict[str, Any]:
     """Check if cert-manager webhook is properly secured"""
     namespace = os.getenv("CERT_MANAGER_NS", "cert-manager")
 
@@ -638,7 +638,7 @@ def check_rbac_destructive_permissions() -> Dict[str, Any]:
     )
 
 
-def test_certmanager_security() -> List[Dict[str, Any]]:
+def test_cert_manager() -> List[Dict[str, Any]]:
     """Run all cert-manager security tests"""
     results = []
 
@@ -647,7 +647,7 @@ def test_certmanager_security() -> List[Dict[str, Any]]:
     results.append(check_certificate_issuers())
 
     # Component Security
-    results.append(test_webhook_security())
+    results.append(check_webhook_security())
     results.append(check_rbac_configuration())
 
     # RBAC Security (detailed checks)
@@ -686,15 +686,9 @@ def test_certmanager_security() -> List[Dict[str, Any]]:
     return results
 
 
-# Alias for UI compatibility - the UI expects test_cert_manager() not test_certmanager_security()
-def test_cert_manager() -> List[Dict[str, Any]]:
-    """Alias for test_certmanager_security() for UI compatibility"""
-    return test_certmanager_security()
-
-
 if __name__ == "__main__":
     try:
-        results = test_certmanager_security()
+        results = test_cert_manager()
         print(json.dumps(results, indent=2))
 
         critical_failures = sum(1 for r in results if not r["status"] and r["severity"] == "CRITICAL")

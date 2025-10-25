@@ -232,7 +232,7 @@ def check_tls_configuration() -> Dict[str, Any]:
         )
 
 
-def test_console_security() -> Dict[str, Any]:
+def check_console_security() -> Dict[str, Any]:
     """Check if MinIO Console is properly secured"""
     host = os.getenv("MINIO_HOST", "minio.minio.svc.cluster.local")
     console_port = int(os.getenv("MINIO_CONSOLE_PORT", "9001"))
@@ -644,7 +644,8 @@ def check_rbac_destructive_permissions() -> Dict[str, Any]:
     )
 
 
-def test_minio_security() -> List[Dict[str, Any]]:
+def test_minio() -> List[Dict[str, Any]]:
+    """Run all minio security tests"""
     """Run all MinIO security tests"""
     results = []
 
@@ -655,7 +656,7 @@ def test_minio_security() -> List[Dict[str, Any]]:
 
     # Network Security
     results.append(check_tls_configuration())
-    results.append(test_console_security())
+    results.append(check_console_security())
     results.append(check_external_exposure())
 
     # Container & Kubernetes Security
@@ -694,15 +695,9 @@ def test_minio_security() -> List[Dict[str, Any]]:
     return results
 
 
-# Alias for UI compatibility - the UI expects test_minio() not test_minio_security()
-def test_minio() -> List[Dict[str, Any]]:
-    """Alias for test_minio_security() for UI compatibility"""
-    return test_minio_security()
-
-
 if __name__ == "__main__":
     try:
-        results = test_minio_security()
+        results = test_minio()
         print(json.dumps(results, indent=2))
 
         # Exit with error code if critical failures exist

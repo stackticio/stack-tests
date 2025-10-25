@@ -703,7 +703,8 @@ def check_rbac_destructive_permissions() -> Dict[str, Any]:
     )
 
 
-def test_cnpg_security() -> List[Dict[str, Any]]:
+def test_cnpg() -> List[Dict[str, Any]]:
+    """Run all cnpg security tests"""
     """Run all CNPG security tests"""
     results = []
 
@@ -758,15 +759,9 @@ def test_cnpg_security() -> List[Dict[str, Any]]:
     return results
 
 
-# Alias for UI compatibility - the UI expects test_cnpg() not test_cnpg_security()
-def test_cnpg() -> List[Dict[str, Any]]:
-    """Alias for test_cnpg_security() for UI compatibility"""
-    return test_cnpg_security()
-
-
 if __name__ == "__main__":
     try:
-        results = test_cnpg_security()
+        results = test_cnpg()
         print(json.dumps(results, indent=2))
 
         # Exit with error code if critical failures exist

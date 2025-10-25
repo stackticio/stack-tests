@@ -230,7 +230,7 @@ def check_public_dashboards() -> Dict[str, Any]:
     )
 
 
-def test_api_key_security() -> Dict[str, Any]:
+def check_api_key_security() -> Dict[str, Any]:
     """Check API keys configuration"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
     host = os.getenv("GRAFANA_HOST", "grafana.grafana.svc.cluster.local")
@@ -489,7 +489,7 @@ def check_network_policies() -> Dict[str, Any]:
         )
 
 
-def test_data_source_security() -> Dict[str, Any]:
+def check_data_source_security() -> Dict[str, Any]:
     """Check data source security configuration"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
     host = os.getenv("GRAFANA_HOST", "grafana.grafana.svc.cluster.local")
@@ -715,7 +715,8 @@ def check_rbac_destructive_permissions() -> Dict[str, Any]:
     )
 
 
-def test_grafana_security() -> List[Dict[str, Any]]:
+def test_grafana() -> List[Dict[str, Any]]:
+    """Run all grafana security tests"""
     """Run all Grafana security tests"""
     results = []
 
@@ -724,10 +725,10 @@ def test_grafana_security() -> List[Dict[str, Any]]:
     results.append(check_weak_admin_password())
     results.append(check_anonymous_access())
     results.append(check_public_dashboards())
-    results.append(test_api_key_security())
+    results.append(check_api_key_security())
 
     # Data Security
-    results.append(test_data_source_security())
+    results.append(check_data_source_security())
 
     # Network Security
     results.append(check_external_exposure())
@@ -768,15 +769,9 @@ def test_grafana_security() -> List[Dict[str, Any]]:
     return results
 
 
-# Alias for UI compatibility - the UI expects test_grafana() not test_grafana_security()
-def test_grafana() -> List[Dict[str, Any]]:
-    """Alias for test_grafana_security() for UI compatibility"""
-    return test_grafana_security()
-
-
 if __name__ == "__main__":
     try:
-        results = test_grafana_security()
+        results = test_grafana()
         print(json.dumps(results, indent=2))
 
         # Exit with error code if critical failures exist
