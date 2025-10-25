@@ -58,7 +58,7 @@ def create_result(name: str, description: str, passed: bool, output: str, severi
     }
 
 
-def test_certificate_expiration() -> Dict[str, Any]:
+def check_certificate_expiration() -> Dict[str, Any]:
     """Check for certificates expiring soon"""
     namespace = os.getenv("CERT_MANAGER_NS", "cert-manager")
 
@@ -217,7 +217,7 @@ def test_webhook_security() -> Dict[str, Any]:
     )
 
 
-def test_rbac_configuration() -> Dict[str, Any]:
+def check_rbac_configuration() -> Dict[str, Any]:
     """Check cert-manager RBAC configuration"""
     namespace = os.getenv("CERT_MANAGER_NS", "cert-manager")
 
@@ -302,7 +302,7 @@ def test_rbac_configuration() -> Dict[str, Any]:
         )
 
 
-def test_certificate_issuers() -> Dict[str, Any]:
+def check_certificate_issuers() -> Dict[str, Any]:
     """Check certificate issuers configuration"""
     # Get all issuers
     cmd = "kubectl get issuers,clusterissuers --all-namespaces -o json"
@@ -372,7 +372,7 @@ def test_certificate_issuers() -> Dict[str, Any]:
         )
 
 
-def test_pod_security_context() -> Dict[str, Any]:
+def check_pod_security_context() -> Dict[str, Any]:
     """Check if cert-manager pods run with secure security context"""
     namespace = os.getenv("CERT_MANAGER_NS", "cert-manager")
 
@@ -449,7 +449,7 @@ def test_pod_security_context() -> Dict[str, Any]:
         )
 
 
-def test_network_policies() -> Dict[str, Any]:
+def check_network_policies() -> Dict[str, Any]:
     """Check if NetworkPolicies are configured for cert-manager"""
     namespace = os.getenv("CERT_MANAGER_NS", "cert-manager")
 
@@ -496,7 +496,7 @@ def test_network_policies() -> Dict[str, Any]:
         )
 
 
-def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
+def check_rbac_overly_permissive_roles() -> Dict[str, Any]:
     """Check if ServiceAccount has overly permissive cluster roles"""
     namespace = os.getenv("CERT_MANAGER_NS", "cert-manager")
     sa_name = os.getenv("CERT_MANAGER_SA", "cert-manager")
@@ -560,7 +560,7 @@ def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
         )
 
 
-def test_rbac_cross_namespace_access() -> Dict[str, Any]:
+def check_rbac_cross_namespace_access() -> Dict[str, Any]:
     """Test if ServiceAccount can access resources in other namespaces"""
     namespace = os.getenv("CERT_MANAGER_NS", "cert-manager")
     sa_name = os.getenv("CERT_MANAGER_SA", "cert-manager")
@@ -593,7 +593,7 @@ def test_rbac_cross_namespace_access() -> Dict[str, Any]:
     )
 
 
-def test_rbac_destructive_permissions() -> Dict[str, Any]:
+def check_rbac_destructive_permissions() -> Dict[str, Any]:
     """Test if ServiceAccount has destructive RBAC permissions"""
     namespace = os.getenv("CERT_MANAGER_NS", "cert-manager")
     sa_name = os.getenv("CERT_MANAGER_SA", "cert-manager")
@@ -643,21 +643,21 @@ def test_certmanager_security() -> List[Dict[str, Any]]:
     results = []
 
     # Certificate Management
-    results.append(test_certificate_expiration())
-    results.append(test_certificate_issuers())
+    results.append(check_certificate_expiration())
+    results.append(check_certificate_issuers())
 
     # Component Security
     results.append(test_webhook_security())
-    results.append(test_rbac_configuration())
+    results.append(check_rbac_configuration())
 
     # RBAC Security (detailed checks)
-    results.append(test_rbac_overly_permissive_roles())
-    results.append(test_rbac_cross_namespace_access())
-    results.append(test_rbac_destructive_permissions())
+    results.append(check_rbac_overly_permissive_roles())
+    results.append(check_rbac_cross_namespace_access())
+    results.append(check_rbac_destructive_permissions())
 
     # Container & Kubernetes Security
-    results.append(test_pod_security_context())
-    results.append(test_network_policies())
+    results.append(check_pod_security_context())
+    results.append(check_network_policies())
 
     # Summary
     total_checks = len(results)

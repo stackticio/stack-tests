@@ -62,7 +62,7 @@ def create_result(name: str, description: str, passed: bool, output: str, severi
     }
 
 
-def test_api_authentication() -> Dict[str, Any]:
+def check_api_authentication() -> Dict[str, Any]:
     """Check if Prometheus API requires authentication"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
     host = os.getenv("PROMETHEUS_HOST", "prometheus.prometheus.svc.cluster.local")
@@ -100,7 +100,7 @@ def test_api_authentication() -> Dict[str, Any]:
         )
 
 
-def test_write_endpoint_protection() -> Dict[str, Any]:
+def check_write_endpoint_protection() -> Dict[str, Any]:
     """Check if write endpoints (remote write) are protected"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
     host = os.getenv("PROMETHEUS_HOST", "prometheus.prometheus.svc.cluster.local")
@@ -192,7 +192,7 @@ def test_admin_api_security() -> Dict[str, Any]:
         )
 
 
-def test_alertmanager_authentication() -> Dict[str, Any]:
+def check_alertmanager_authentication() -> Dict[str, Any]:
     """Check if AlertManager requires authentication"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
     host = os.getenv("ALERTMANAGER_HOST", "alertmanager.prometheus.svc.cluster.local")
@@ -238,7 +238,7 @@ def test_alertmanager_authentication() -> Dict[str, Any]:
         )
 
 
-def test_external_exposure() -> Dict[str, Any]:
+def check_external_exposure() -> Dict[str, Any]:
     """Check if Prometheus is exposed externally"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
 
@@ -298,7 +298,7 @@ def test_external_exposure() -> Dict[str, Any]:
         )
 
 
-def test_pod_security_context() -> Dict[str, Any]:
+def check_pod_security_context() -> Dict[str, Any]:
     """Check if Prometheus pods run with secure security context"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
 
@@ -383,7 +383,7 @@ def test_pod_security_context() -> Dict[str, Any]:
         )
 
 
-def test_network_policies() -> Dict[str, Any]:
+def check_network_policies() -> Dict[str, Any]:
     """Check if NetworkPolicies are configured for Prometheus namespace"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
 
@@ -431,7 +431,7 @@ def test_network_policies() -> Dict[str, Any]:
         )
 
 
-def test_rbac_configuration() -> Dict[str, Any]:
+def check_rbac_configuration() -> Dict[str, Any]:
     """Check if Prometheus ServiceAccount has appropriate RBAC permissions"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
 
@@ -526,7 +526,7 @@ def test_rbac_configuration() -> Dict[str, Any]:
         )
 
 
-def test_data_retention() -> Dict[str, Any]:
+def check_data_retention() -> Dict[str, Any]:
     """Check if data retention is configured (prevent disk exhaustion)"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
     host = os.getenv("PROMETHEUS_HOST", "prometheus.prometheus.svc.cluster.local")
@@ -578,7 +578,7 @@ def test_data_retention() -> Dict[str, Any]:
         )
 
 
-def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
+def check_rbac_overly_permissive_roles() -> Dict[str, Any]:
     """Check if ServiceAccount has overly permissive cluster roles"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
     sa_name = os.getenv("PROMETHEUS_SA", "prometheus-server")
@@ -642,7 +642,7 @@ def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
         )
 
 
-def test_rbac_cross_namespace_access() -> Dict[str, Any]:
+def check_rbac_cross_namespace_access() -> Dict[str, Any]:
     """Test if ServiceAccount can access resources in other namespaces"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
     sa_name = os.getenv("PROMETHEUS_SA", "prometheus-server")
@@ -681,7 +681,7 @@ def test_rbac_cross_namespace_access() -> Dict[str, Any]:
     )
 
 
-def test_rbac_destructive_permissions() -> Dict[str, Any]:
+def check_rbac_destructive_permissions() -> Dict[str, Any]:
     """Test if ServiceAccount has destructive RBAC permissions"""
     namespace = os.getenv("PROMETHEUS_NS", "prometheus")
     sa_name = os.getenv("PROMETHEUS_SA", "prometheus-server")
@@ -731,26 +731,26 @@ def test_prometheus_security() -> List[Dict[str, Any]]:
     results = []
 
     # API Security
-    results.append(test_api_authentication())
-    results.append(test_write_endpoint_protection())
+    results.append(check_api_authentication())
+    results.append(check_write_endpoint_protection())
     results.append(test_admin_api_security())
-    results.append(test_alertmanager_authentication())
+    results.append(check_alertmanager_authentication())
 
     # Network Security
-    results.append(test_external_exposure())
-    results.append(test_network_policies())
+    results.append(check_external_exposure())
+    results.append(check_network_policies())
 
     # Container & Kubernetes Security
-    results.append(test_pod_security_context())
-    results.append(test_rbac_configuration())
+    results.append(check_pod_security_context())
+    results.append(check_rbac_configuration())
 
     # RBAC Security (detailed checks)
-    results.append(test_rbac_overly_permissive_roles())
-    results.append(test_rbac_cross_namespace_access())
-    results.append(test_rbac_destructive_permissions())
+    results.append(check_rbac_overly_permissive_roles())
+    results.append(check_rbac_cross_namespace_access())
+    results.append(check_rbac_destructive_permissions())
 
     # Data Security
-    results.append(test_data_retention())
+    results.append(check_data_retention())
 
     # Summary
     total_checks = len(results)

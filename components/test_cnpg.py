@@ -65,7 +65,7 @@ def create_result(name: str, description: str, passed: bool, output: str, severi
     }
 
 
-def test_default_postgres_credentials() -> Dict[str, Any]:
+def check_default_postgres_credentials() -> Dict[str, Any]:
     """Test if default postgres/postgres credentials work"""
     namespace = os.getenv("CNPG_NS", "cnpg")
     host = os.getenv("CNPG_HOST", "cnpg-rw.cnpg.svc.cluster.local")
@@ -102,7 +102,7 @@ def test_default_postgres_credentials() -> Dict[str, Any]:
         )
 
 
-def test_weak_admin_password() -> Dict[str, Any]:
+def check_weak_admin_password() -> Dict[str, Any]:
     """Check if admin password is weak or default"""
     admin_password = os.getenv("CNPG_ADMIN_PASSWORD", "")
 
@@ -139,7 +139,7 @@ def test_weak_admin_password() -> Dict[str, Any]:
         )
 
 
-def test_ssl_configuration() -> Dict[str, Any]:
+def check_ssl_configuration() -> Dict[str, Any]:
     """Check if PostgreSQL enforces SSL/TLS connections"""
     namespace = os.getenv("CNPG_NS", "cnpg")
     cluster_name = os.getenv("CNPG_CLUSTER_NAME", "cluster-cnpg")
@@ -191,7 +191,7 @@ def test_ssl_configuration() -> Dict[str, Any]:
         )
 
 
-def test_external_exposure() -> Dict[str, Any]:
+def check_external_exposure() -> Dict[str, Any]:
     """Check if PostgreSQL is exposed externally via LoadBalancer"""
     namespace = os.getenv("CNPG_NS", "cnpg")
 
@@ -253,7 +253,7 @@ def test_external_exposure() -> Dict[str, Any]:
         )
 
 
-def test_pod_security_context() -> Dict[str, Any]:
+def check_pod_security_context() -> Dict[str, Any]:
     """Check if PostgreSQL pods run with secure security context"""
     namespace = os.getenv("CNPG_NS", "cnpg")
     cluster_name = os.getenv("CNPG_CLUSTER_NAME", "cluster-cnpg")
@@ -343,7 +343,7 @@ def test_pod_security_context() -> Dict[str, Any]:
         )
 
 
-def test_network_policies() -> Dict[str, Any]:
+def check_network_policies() -> Dict[str, Any]:
     """Check if NetworkPolicies are configured for CNPG namespace"""
     namespace = os.getenv("CNPG_NS", "cnpg")
 
@@ -391,7 +391,7 @@ def test_network_policies() -> Dict[str, Any]:
         )
 
 
-def test_backup_encryption() -> Dict[str, Any]:
+def check_backup_encryption() -> Dict[str, Any]:
     """Check if database backups are encrypted"""
     namespace = os.getenv("CNPG_NS", "cnpg")
     cluster_name = os.getenv("CNPG_CLUSTER_NAME", "cluster-cnpg")
@@ -455,7 +455,7 @@ def test_backup_encryption() -> Dict[str, Any]:
         )
 
 
-def test_superuser_access() -> Dict[str, Any]:
+def check_superuser_access() -> Dict[str, Any]:
     """Check if superuser access is properly restricted"""
     namespace = os.getenv("CNPG_NS", "cnpg")
     cluster_name = os.getenv("CNPG_CLUSTER_NAME", "cluster-cnpg")
@@ -506,7 +506,7 @@ def test_superuser_access() -> Dict[str, Any]:
         )
 
 
-def test_replica_mode() -> Dict[str, Any]:
+def check_replica_mode() -> Dict[str, Any]:
     """Check if cluster has replicas for high availability"""
     namespace = os.getenv("CNPG_NS", "cnpg")
     cluster_name = os.getenv("CNPG_CLUSTER_NAME", "cluster-cnpg")
@@ -555,7 +555,7 @@ def test_replica_mode() -> Dict[str, Any]:
         )
 
 
-def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
+def check_rbac_overly_permissive_roles() -> Dict[str, Any]:
     """Check if ServiceAccount has overly permissive cluster roles"""
     namespace = os.getenv("CNPG_NS", "cnpg")
     # CNPG operator typically uses this ServiceAccount name
@@ -620,7 +620,7 @@ def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
         )
 
 
-def test_rbac_cross_namespace_access() -> Dict[str, Any]:
+def check_rbac_cross_namespace_access() -> Dict[str, Any]:
     """Test if ServiceAccount can access resources in other namespaces"""
     namespace = os.getenv("CNPG_NS", "cnpg")
     sa_name = os.getenv("CNPG_SA", "cnpg-postgres")
@@ -658,7 +658,7 @@ def test_rbac_cross_namespace_access() -> Dict[str, Any]:
     )
 
 
-def test_rbac_destructive_permissions() -> Dict[str, Any]:
+def check_rbac_destructive_permissions() -> Dict[str, Any]:
     """Test if ServiceAccount has destructive RBAC permissions"""
     namespace = os.getenv("CNPG_NS", "cnpg")
     sa_name = os.getenv("CNPG_SA", "cnpg-postgres")
@@ -708,28 +708,28 @@ def test_cnpg_security() -> List[Dict[str, Any]]:
     results = []
 
     # Authentication & Authorization
-    results.append(test_default_postgres_credentials())
-    results.append(test_weak_admin_password())
-    results.append(test_superuser_access())
+    results.append(check_default_postgres_credentials())
+    results.append(check_weak_admin_password())
+    results.append(check_superuser_access())
 
     # Network Security
-    results.append(test_ssl_configuration())
-    results.append(test_external_exposure())
-    results.append(test_network_policies())
+    results.append(check_ssl_configuration())
+    results.append(check_external_exposure())
+    results.append(check_network_policies())
 
     # Data Security
-    results.append(test_backup_encryption())
+    results.append(check_backup_encryption())
 
     # Container & Kubernetes Security
-    results.append(test_pod_security_context())
+    results.append(check_pod_security_context())
 
     # High Availability (impacts security)
-    results.append(test_replica_mode())
+    results.append(check_replica_mode())
 
     # RBAC Security
-    results.append(test_rbac_overly_permissive_roles())
-    results.append(test_rbac_cross_namespace_access())
-    results.append(test_rbac_destructive_permissions())
+    results.append(check_rbac_overly_permissive_roles())
+    results.append(check_rbac_cross_namespace_access())
+    results.append(check_rbac_destructive_permissions())
 
     # Summary
     total_checks = len(results)

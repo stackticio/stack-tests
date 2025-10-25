@@ -62,7 +62,7 @@ def create_result(name: str, description: str, passed: bool, output: str, severi
     }
 
 
-def test_default_admin_credentials() -> Dict[str, Any]:
+def check_default_admin_credentials() -> Dict[str, Any]:
     """Test if default admin/admin credentials work"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
     host = os.getenv("GRAFANA_HOST", "grafana.grafana.svc.cluster.local")
@@ -100,7 +100,7 @@ def test_default_admin_credentials() -> Dict[str, Any]:
         )
 
 
-def test_weak_admin_password() -> Dict[str, Any]:
+def check_weak_admin_password() -> Dict[str, Any]:
     """Check if admin password is weak or default"""
     admin_password = os.getenv("GRAFANA_ADMIN_PASSWORD", "")
 
@@ -137,7 +137,7 @@ def test_weak_admin_password() -> Dict[str, Any]:
         )
 
 
-def test_anonymous_access() -> Dict[str, Any]:
+def check_anonymous_access() -> Dict[str, Any]:
     """Check if anonymous access is enabled"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
     host = os.getenv("GRAFANA_HOST", "grafana.grafana.svc.cluster.local")
@@ -175,7 +175,7 @@ def test_anonymous_access() -> Dict[str, Any]:
         )
 
 
-def test_public_dashboards() -> Dict[str, Any]:
+def check_public_dashboards() -> Dict[str, Any]:
     """Check if public dashboards feature is disabled"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
     host = os.getenv("GRAFANA_HOST", "grafana.grafana.svc.cluster.local")
@@ -286,7 +286,7 @@ def test_api_key_security() -> Dict[str, Any]:
     )
 
 
-def test_external_exposure() -> Dict[str, Any]:
+def check_external_exposure() -> Dict[str, Any]:
     """Check if Grafana is exposed externally"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
 
@@ -355,7 +355,7 @@ def test_external_exposure() -> Dict[str, Any]:
         )
 
 
-def test_pod_security_context() -> Dict[str, Any]:
+def check_pod_security_context() -> Dict[str, Any]:
     """Check if Grafana pods run with secure security context"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
 
@@ -441,7 +441,7 @@ def test_pod_security_context() -> Dict[str, Any]:
         )
 
 
-def test_network_policies() -> Dict[str, Any]:
+def check_network_policies() -> Dict[str, Any]:
     """Check if NetworkPolicies are configured for Grafana namespace"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
 
@@ -568,7 +568,7 @@ def test_data_source_security() -> Dict[str, Any]:
     )
 
 
-def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
+def check_rbac_overly_permissive_roles() -> Dict[str, Any]:
     """Check if ServiceAccount has overly permissive cluster roles"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
     sa_name = os.getenv("GRAFANA_SA", "grafana")
@@ -632,7 +632,7 @@ def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
         )
 
 
-def test_rbac_cross_namespace_access() -> Dict[str, Any]:
+def check_rbac_cross_namespace_access() -> Dict[str, Any]:
     """Test if ServiceAccount can access resources in other namespaces"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
     sa_name = os.getenv("GRAFANA_SA", "grafana")
@@ -670,7 +670,7 @@ def test_rbac_cross_namespace_access() -> Dict[str, Any]:
     )
 
 
-def test_rbac_destructive_permissions() -> Dict[str, Any]:
+def check_rbac_destructive_permissions() -> Dict[str, Any]:
     """Test if ServiceAccount has destructive RBAC permissions"""
     namespace = os.getenv("GRAFANA_NS", "grafana")
     sa_name = os.getenv("GRAFANA_SA", "grafana")
@@ -720,26 +720,26 @@ def test_grafana_security() -> List[Dict[str, Any]]:
     results = []
 
     # Authentication & Authorization
-    results.append(test_default_admin_credentials())
-    results.append(test_weak_admin_password())
-    results.append(test_anonymous_access())
-    results.append(test_public_dashboards())
+    results.append(check_default_admin_credentials())
+    results.append(check_weak_admin_password())
+    results.append(check_anonymous_access())
+    results.append(check_public_dashboards())
     results.append(test_api_key_security())
 
     # Data Security
     results.append(test_data_source_security())
 
     # Network Security
-    results.append(test_external_exposure())
-    results.append(test_network_policies())
+    results.append(check_external_exposure())
+    results.append(check_network_policies())
 
     # Container & Kubernetes Security
-    results.append(test_pod_security_context())
+    results.append(check_pod_security_context())
 
     # RBAC Security
-    results.append(test_rbac_overly_permissive_roles())
-    results.append(test_rbac_cross_namespace_access())
-    results.append(test_rbac_destructive_permissions())
+    results.append(check_rbac_overly_permissive_roles())
+    results.append(check_rbac_cross_namespace_access())
+    results.append(check_rbac_destructive_permissions())
 
     # Summary
     total_checks = len(results)

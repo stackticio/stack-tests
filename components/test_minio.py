@@ -64,7 +64,7 @@ def create_result(name: str, description: str, passed: bool, output: str, severi
     }
 
 
-def test_default_credentials() -> Dict[str, Any]:
+def check_default_credentials() -> Dict[str, Any]:
     """Test if default minioadmin/minioadmin credentials work"""
     host = os.getenv("MINIO_HOST", "minio.minio.svc.cluster.local")
     port = os.getenv("MINIO_PORT", "9000")
@@ -109,7 +109,7 @@ def test_default_credentials() -> Dict[str, Any]:
         )
 
 
-def test_weak_admin_password() -> Dict[str, Any]:
+def check_weak_admin_password() -> Dict[str, Any]:
     """Check if admin password is weak or default"""
     secret_key = os.getenv("MINIO_SECRET_KEY", "")
 
@@ -144,7 +144,7 @@ def test_weak_admin_password() -> Dict[str, Any]:
         )
 
 
-def test_anonymous_bucket_access() -> Dict[str, Any]:
+def check_anonymous_bucket_access() -> Dict[str, Any]:
     """Test if buckets allow anonymous access"""
     host = os.getenv("MINIO_HOST", "minio.minio.svc.cluster.local")
     port = os.getenv("MINIO_PORT", "9000")
@@ -179,7 +179,7 @@ def test_anonymous_bucket_access() -> Dict[str, Any]:
         )
 
 
-def test_tls_configuration() -> Dict[str, Any]:
+def check_tls_configuration() -> Dict[str, Any]:
     """Check if MinIO is using TLS/SSL"""
     host = os.getenv("MINIO_HOST", "minio.minio.svc.cluster.local")
     port = os.getenv("MINIO_PORT", "9000")
@@ -290,7 +290,7 @@ def test_console_security() -> Dict[str, Any]:
         )
 
 
-def test_external_exposure() -> Dict[str, Any]:
+def check_external_exposure() -> Dict[str, Any]:
     """Check if MinIO is exposed externally via LoadBalancer"""
     namespace = os.getenv("MINIO_NS", "minio")
 
@@ -358,7 +358,7 @@ def test_external_exposure() -> Dict[str, Any]:
         )
 
 
-def test_pod_security_context() -> Dict[str, Any]:
+def check_pod_security_context() -> Dict[str, Any]:
     """Check if MinIO pods run with secure security context"""
     namespace = os.getenv("MINIO_NS", "minio")
 
@@ -450,7 +450,7 @@ def test_pod_security_context() -> Dict[str, Any]:
         )
 
 
-def test_network_policies() -> Dict[str, Any]:
+def check_network_policies() -> Dict[str, Any]:
     """Check if NetworkPolicies are configured for MinIO namespace"""
     namespace = os.getenv("MINIO_NS", "minio")
 
@@ -497,7 +497,7 @@ def test_network_policies() -> Dict[str, Any]:
         )
 
 
-def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
+def check_rbac_overly_permissive_roles() -> Dict[str, Any]:
     """Check if ServiceAccount has overly permissive cluster roles"""
     namespace = os.getenv("MINIO_NS", "minio")
     sa_name = os.getenv("MINIO_SA", "minio")
@@ -561,7 +561,7 @@ def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
         )
 
 
-def test_rbac_cross_namespace_access() -> Dict[str, Any]:
+def check_rbac_cross_namespace_access() -> Dict[str, Any]:
     """Test if ServiceAccount can access resources in other namespaces"""
     namespace = os.getenv("MINIO_NS", "minio")
     sa_name = os.getenv("MINIO_SA", "minio")
@@ -599,7 +599,7 @@ def test_rbac_cross_namespace_access() -> Dict[str, Any]:
     )
 
 
-def test_rbac_destructive_permissions() -> Dict[str, Any]:
+def check_rbac_destructive_permissions() -> Dict[str, Any]:
     """Test if ServiceAccount has destructive RBAC permissions"""
     namespace = os.getenv("MINIO_NS", "minio")
     sa_name = os.getenv("MINIO_SA", "minio")
@@ -649,23 +649,23 @@ def test_minio_security() -> List[Dict[str, Any]]:
     results = []
 
     # Authentication & Authorization
-    results.append(test_default_credentials())
-    results.append(test_weak_admin_password())
-    results.append(test_anonymous_bucket_access())
+    results.append(check_default_credentials())
+    results.append(check_weak_admin_password())
+    results.append(check_anonymous_bucket_access())
 
     # Network Security
-    results.append(test_tls_configuration())
+    results.append(check_tls_configuration())
     results.append(test_console_security())
-    results.append(test_external_exposure())
+    results.append(check_external_exposure())
 
     # Container & Kubernetes Security
-    results.append(test_pod_security_context())
-    results.append(test_network_policies())
+    results.append(check_pod_security_context())
+    results.append(check_network_policies())
 
     # RBAC Security
-    results.append(test_rbac_overly_permissive_roles())
-    results.append(test_rbac_cross_namespace_access())
-    results.append(test_rbac_destructive_permissions())
+    results.append(check_rbac_overly_permissive_roles())
+    results.append(check_rbac_cross_namespace_access())
+    results.append(check_rbac_destructive_permissions())
 
     # Summary
     total_checks = len(results)

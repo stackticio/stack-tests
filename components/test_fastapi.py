@@ -64,7 +64,7 @@ def create_result(name: str, description: str, passed: bool, output: str, severi
     }
 
 
-def test_api_docs_exposure() -> Dict[str, Any]:
+def check_api_docs_exposure() -> Dict[str, Any]:
     """Check if API documentation is publicly accessible"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
     host = os.getenv("FASTAPI_HOST", "fastapi.fastapi.svc.cluster.local")
@@ -122,7 +122,7 @@ def test_api_docs_exposure() -> Dict[str, Any]:
         )
 
 
-def test_api_key_security() -> Dict[str, Any]:
+def check_api_key_security() -> Dict[str, Any]:
     """Check API key configuration"""
     api_key = os.getenv("FASTAPI_API_KEY", "")
 
@@ -167,7 +167,7 @@ def test_api_key_security() -> Dict[str, Any]:
         )
 
 
-def test_cors_configuration() -> Dict[str, Any]:
+def check_cors_configuration() -> Dict[str, Any]:
     """Check CORS configuration for security issues"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
     host = os.getenv("FASTAPI_HOST", "fastapi.fastapi.svc.cluster.local")
@@ -223,7 +223,7 @@ def test_cors_configuration() -> Dict[str, Any]:
         )
 
 
-def test_health_endpoint_exposure() -> Dict[str, Any]:
+def check_health_endpoint_exposure() -> Dict[str, Any]:
     """Check if health endpoint exposes sensitive information"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
     host = os.getenv("FASTAPI_HOST", "fastapi.fastapi.svc.cluster.local")
@@ -284,7 +284,7 @@ def test_health_endpoint_exposure() -> Dict[str, Any]:
         )
 
 
-def test_authentication_required() -> Dict[str, Any]:
+def check_authentication_required() -> Dict[str, Any]:
     """Check if API endpoints require authentication"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
     host = os.getenv("FASTAPI_HOST", "fastapi.fastapi.svc.cluster.local")
@@ -327,7 +327,7 @@ def test_authentication_required() -> Dict[str, Any]:
         )
 
 
-def test_external_exposure() -> Dict[str, Any]:
+def check_external_exposure() -> Dict[str, Any]:
     """Check if FastAPI is exposed externally"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
 
@@ -396,7 +396,7 @@ def test_external_exposure() -> Dict[str, Any]:
         )
 
 
-def test_pod_security_context() -> Dict[str, Any]:
+def check_pod_security_context() -> Dict[str, Any]:
     """Check if FastAPI pods run with secure security context"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
 
@@ -480,7 +480,7 @@ def test_pod_security_context() -> Dict[str, Any]:
         )
 
 
-def test_network_policies() -> Dict[str, Any]:
+def check_network_policies() -> Dict[str, Any]:
     """Check if NetworkPolicies are configured for FastAPI namespace"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
 
@@ -528,7 +528,7 @@ def test_network_policies() -> Dict[str, Any]:
         )
 
 
-def test_secret_management() -> Dict[str, Any]:
+def check_secret_management() -> Dict[str, Any]:
     """Check if secrets are properly managed (not in env vars)"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
 
@@ -601,7 +601,7 @@ def test_secret_management() -> Dict[str, Any]:
         )
 
 
-def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
+def check_rbac_overly_permissive_roles() -> Dict[str, Any]:
     """Check if ServiceAccount has overly permissive cluster roles"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
     sa_name = os.getenv("FASTAPI_SA", "fastapi")
@@ -665,7 +665,7 @@ def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
         )
 
 
-def test_rbac_cross_namespace_access() -> Dict[str, Any]:
+def check_rbac_cross_namespace_access() -> Dict[str, Any]:
     """Test if ServiceAccount can access resources in other namespaces"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
     sa_name = os.getenv("FASTAPI_SA", "fastapi")
@@ -703,7 +703,7 @@ def test_rbac_cross_namespace_access() -> Dict[str, Any]:
     )
 
 
-def test_rbac_destructive_permissions() -> Dict[str, Any]:
+def check_rbac_destructive_permissions() -> Dict[str, Any]:
     """Test if ServiceAccount has destructive RBAC permissions"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
     sa_name = os.getenv("FASTAPI_SA", "fastapi")
@@ -753,24 +753,24 @@ def test_fastapi_security() -> List[Dict[str, Any]]:
     results = []
 
     # API Security
-    results.append(test_api_docs_exposure())
-    results.append(test_authentication_required())
-    results.append(test_api_key_security())
-    results.append(test_cors_configuration())
-    results.append(test_health_endpoint_exposure())
+    results.append(check_api_docs_exposure())
+    results.append(check_authentication_required())
+    results.append(check_api_key_security())
+    results.append(check_cors_configuration())
+    results.append(check_health_endpoint_exposure())
 
     # Network Security
-    results.append(test_external_exposure())
-    results.append(test_network_policies())
+    results.append(check_external_exposure())
+    results.append(check_network_policies())
 
     # Container & Kubernetes Security
-    results.append(test_pod_security_context())
-    results.append(test_secret_management())
+    results.append(check_pod_security_context())
+    results.append(check_secret_management())
 
     # RBAC Security
-    results.append(test_rbac_overly_permissive_roles())
-    results.append(test_rbac_cross_namespace_access())
-    results.append(test_rbac_destructive_permissions())
+    results.append(check_rbac_overly_permissive_roles())
+    results.append(check_rbac_cross_namespace_access())
+    results.append(check_rbac_destructive_permissions())
 
     # Summary
     total_checks = len(results)

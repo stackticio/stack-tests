@@ -63,7 +63,7 @@ def create_result(name: str, description: str, passed: bool, output: str, severi
     }
 
 
-def test_admin_api_protection() -> Dict[str, Any]:
+def check_admin_api_protection() -> Dict[str, Any]:
     """Check if Admin API is protected"""
     namespace = os.getenv("APISIX_NS", "ingress-apisix")
     admin_host = os.getenv("APISIX_ADMIN_HOST", "apisix-admin.ingress-apisix.svc.cluster.local")
@@ -109,7 +109,7 @@ def test_admin_api_protection() -> Dict[str, Any]:
         )
 
 
-def test_default_admin_key() -> Dict[str, Any]:
+def check_default_admin_key() -> Dict[str, Any]:
     """Check if default admin key is used"""
     # Default APISIX admin key
     default_key = "edd1c9f034335f136f87ad84b625c8f1"
@@ -209,7 +209,7 @@ def test_etcd_security() -> Dict[str, Any]:
     )
 
 
-def test_route_authentication() -> Dict[str, Any]:
+def check_route_authentication() -> Dict[str, Any]:
     """Check if routes have authentication configured"""
     admin_host = os.getenv("APISIX_ADMIN_HOST", "apisix-admin.ingress-apisix.svc.cluster.local")
     admin_port = os.getenv("APISIX_ADMIN_PORT", "9180")
@@ -300,7 +300,7 @@ def test_route_authentication() -> Dict[str, Any]:
         )
 
 
-def test_ssl_configuration() -> Dict[str, Any]:
+def check_ssl_configuration() -> Dict[str, Any]:
     """Check SSL/TLS configuration"""
     admin_host = os.getenv("APISIX_ADMIN_HOST", "apisix-admin.ingress-apisix.svc.cluster.local")
     admin_port = os.getenv("APISIX_ADMIN_PORT", "9180")
@@ -359,7 +359,7 @@ def test_ssl_configuration() -> Dict[str, Any]:
         )
 
 
-def test_external_exposure() -> Dict[str, Any]:
+def check_external_exposure() -> Dict[str, Any]:
     """Check if APISIX is exposed externally"""
     namespace = os.getenv("APISIX_NS", "ingress-apisix")
 
@@ -419,7 +419,7 @@ def test_external_exposure() -> Dict[str, Any]:
         )
 
 
-def test_pod_security_context() -> Dict[str, Any]:
+def check_pod_security_context() -> Dict[str, Any]:
     """Check if APISIX pods run with secure security context"""
     namespace = os.getenv("APISIX_NS", "ingress-apisix")
 
@@ -493,7 +493,7 @@ def test_pod_security_context() -> Dict[str, Any]:
         )
 
 
-def test_network_policies() -> Dict[str, Any]:
+def check_network_policies() -> Dict[str, Any]:
     """Check if NetworkPolicies are configured"""
     namespace = os.getenv("APISIX_NS", "ingress-apisix")
 
@@ -540,7 +540,7 @@ def test_network_policies() -> Dict[str, Any]:
         )
 
 
-def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
+def check_rbac_overly_permissive_roles() -> Dict[str, Any]:
     """Check if ServiceAccount has overly permissive cluster roles"""
     namespace = os.getenv("APISIX_NS", "apisix")
     sa_name = os.getenv("APISIX_SA", "apisix")
@@ -604,7 +604,7 @@ def test_rbac_overly_permissive_roles() -> Dict[str, Any]:
         )
 
 
-def test_rbac_cross_namespace_access() -> Dict[str, Any]:
+def check_rbac_cross_namespace_access() -> Dict[str, Any]:
     """Test if ServiceAccount can access resources in other namespaces"""
     namespace = os.getenv("APISIX_NS", "apisix")
     sa_name = os.getenv("APISIX_SA", "apisix")
@@ -642,7 +642,7 @@ def test_rbac_cross_namespace_access() -> Dict[str, Any]:
     )
 
 
-def test_rbac_destructive_permissions() -> Dict[str, Any]:
+def check_rbac_destructive_permissions() -> Dict[str, Any]:
     """Test if ServiceAccount has destructive RBAC permissions"""
     namespace = os.getenv("APISIX_NS", "apisix")
     sa_name = os.getenv("APISIX_SA", "apisix")
@@ -692,23 +692,23 @@ def test_apisix_security() -> List[Dict[str, Any]]:
     results = []
 
     # API Gateway Security
-    results.append(test_admin_api_protection())
-    results.append(test_default_admin_key())
-    results.append(test_route_authentication())
-    results.append(test_ssl_configuration())
+    results.append(check_admin_api_protection())
+    results.append(check_default_admin_key())
+    results.append(check_route_authentication())
+    results.append(check_ssl_configuration())
 
     # Infrastructure Security
     results.append(test_etcd_security())
-    results.append(test_external_exposure())
+    results.append(check_external_exposure())
 
     # Container & Kubernetes Security
-    results.append(test_pod_security_context())
-    results.append(test_network_policies())
+    results.append(check_pod_security_context())
+    results.append(check_network_policies())
 
     # RBAC Security
-    results.append(test_rbac_overly_permissive_roles())
-    results.append(test_rbac_cross_namespace_access())
-    results.append(test_rbac_destructive_permissions())
+    results.append(check_rbac_overly_permissive_roles())
+    results.append(check_rbac_cross_namespace_access())
+    results.append(check_rbac_destructive_permissions())
 
     # Summary
     total_checks = len(results)
