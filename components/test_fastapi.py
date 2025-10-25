@@ -5,7 +5,7 @@ Analyzes Prometheus metrics from FastAPI application
 
 ENV VARS:
   FASTAPI_NS (default: fastapi)
-  FASTAPI_PORT (default: 80)
+  FASTAPI_SERVICE_PORT (default: 80)
 
 Output: JSON array of test results
 """
@@ -85,7 +85,7 @@ def count_metrics(metrics_text: str) -> int:
 def test_fastapi_metrics() -> List[Dict[str, Any]]:
     """Analyze FastAPI metrics"""
     namespace = os.getenv("FASTAPI_NS", "fastapi")
-    port = int(os.getenv("FASTAPI_PORT", "80"))
+    port = int(os.getenv("FASTAPI_SERVICE_PORT", "80"))
     service = "fastapi"
 
     results = []
