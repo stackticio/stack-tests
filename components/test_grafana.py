@@ -768,6 +768,12 @@ def test_grafana_security() -> List[Dict[str, Any]]:
     return results
 
 
+# Alias for UI compatibility - the UI expects test_grafana() not test_grafana_security()
+def test_grafana() -> List[Dict[str, Any]]:
+    """Alias for test_grafana_security() for UI compatibility"""
+    return test_grafana_security()
+
+
 if __name__ == "__main__":
     try:
         results = test_grafana_security()

@@ -694,6 +694,12 @@ def test_minio_security() -> List[Dict[str, Any]]:
     return results
 
 
+# Alias for UI compatibility - the UI expects test_minio() not test_minio_security()
+def test_minio() -> List[Dict[str, Any]]:
+    """Alias for test_minio_security() for UI compatibility"""
+    return test_minio_security()
+
+
 if __name__ == "__main__":
     try:
         results = test_minio_security()

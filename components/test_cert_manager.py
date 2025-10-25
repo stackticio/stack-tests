@@ -686,6 +686,12 @@ def test_certmanager_security() -> List[Dict[str, Any]]:
     return results
 
 
+# Alias for UI compatibility - the UI expects test_cert_manager() not test_certmanager_security()
+def test_cert_manager() -> List[Dict[str, Any]]:
+    """Alias for test_certmanager_security() for UI compatibility"""
+    return test_certmanager_security()
+
+
 if __name__ == "__main__":
     try:
         results = test_certmanager_security()

@@ -799,6 +799,12 @@ def test_fastapi_security() -> List[Dict[str, Any]]:
     return results
 
 
+# Alias for UI compatibility - the UI expects test_fastapi() not test_fastapi_security()
+def test_fastapi() -> List[Dict[str, Any]]:
+    """Alias for test_fastapi_security() for UI compatibility"""
+    return test_fastapi_security()
+
+
 if __name__ == "__main__":
     try:
         results = test_fastapi_security()

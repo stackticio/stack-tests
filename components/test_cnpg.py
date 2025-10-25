@@ -758,6 +758,12 @@ def test_cnpg_security() -> List[Dict[str, Any]]:
     return results
 
 
+# Alias for UI compatibility - the UI expects test_cnpg() not test_cnpg_security()
+def test_cnpg() -> List[Dict[str, Any]]:
+    """Alias for test_cnpg_security() for UI compatibility"""
+    return test_cnpg_security()
+
+
 if __name__ == "__main__":
     try:
         results = test_cnpg_security()

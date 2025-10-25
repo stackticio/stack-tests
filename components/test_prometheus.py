@@ -779,6 +779,12 @@ def test_prometheus_security() -> List[Dict[str, Any]]:
     return results
 
 
+# Alias for UI compatibility - the UI expects test_prometheus() not test_prometheus_security()
+def test_prometheus() -> List[Dict[str, Any]]:
+    """Alias for test_prometheus_security() for UI compatibility"""
+    return test_prometheus_security()
+
+
 if __name__ == "__main__":
     try:
         results = test_prometheus_security()

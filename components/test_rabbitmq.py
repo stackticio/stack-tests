@@ -692,6 +692,12 @@ def test_rabbitmq_security() -> List[Dict[str, Any]]:
     return results
 
 
+# Alias for UI compatibility - the UI expects test_rabbitmq() not test_rabbitmq_security()
+def test_rabbitmq() -> List[Dict[str, Any]]:
+    """Alias for test_rabbitmq_security() for UI compatibility"""
+    return test_rabbitmq_security()
+
+
 if __name__ == "__main__":
     try:
         results = test_rabbitmq_security()
