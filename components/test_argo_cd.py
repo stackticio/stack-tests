@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-test_argocd_dynamic.py - Dynamic ArgoCD tester that discovers and tests all applications
+test_argo_cd.py - Dynamic ArgoCD tester that discovers and tests all applications
 Tests ArgoCD server health, application sync status, and resource health
+
+Uses kubectl only - no argocd CLI required
 
 ENV VARS:
   ARGOCD_NS (default: argocd)
@@ -377,58 +379,60 @@ def check_application_logs(time_window_minutes: int = 5) -> List[Dict[str, Any]]
     return tests
 
 
-def check_argocd_cli_access() -> List[Dict[str, Any]]:
-    """Test ArgoCD CLI access through stack-agent"""
+def check_argocd_api_access() -> List[Dict[str, Any]]:
+    """Test ArgoCD API access using kubectl and curl (no argocd CLI needed)"""
     tests: List[Dict[str, Any]] = []
     config = get_config()
-    
-    # Test if argocd CLI is available in stack-agent
-    cmd = "kubectl exec -n stack-agent deployment/stack-agent -- which argocd 2>/dev/null"
+
+    # Test API access through kubectl port-forward or direct service access
+    # Get the server service endpoint
+    cmd = f"kubectl get svc -n {config['namespace']} {config['server']} -o jsonpath='{{.spec.clusterIP}}' 2>/dev/null"
     result = run_command(cmd, timeout=10)
-    
+
     if ok(result) and result["stdout"]:
+        cluster_ip = result["stdout"]
         tests.append(create_test_result(
-            "argocd_cli_available",
-            "ArgoCD CLI availability in stack-agent",
+            "argocd_api_accessible",
+            "ArgoCD API service accessibility",
             True,
-            f"✓ ArgoCD CLI found at {result['stdout']}",
+            f"✓ API service accessible at {cluster_ip}:{config['port']}",
             "info"
         ))
-        
-        # Try to login and list apps
-        login_cmd = f"""kubectl exec -n stack-agent deployment/stack-agent -- \
-            argocd login {config['server']}:{config['port']} \
-            --username {config['username']} \
-            --password '{config['password']}' \
-            --insecure --grpc-web 2>&1"""
-        
-        login_result = run_command(login_cmd, timeout=15)
-        
-        if ok(login_result):
+
+        # Try to access the API version endpoint (doesn't require auth)
+        api_cmd = f"""kubectl run test-argocd-api-$RANDOM --rm -i --restart=Never --image=curlimages/curl:latest -n {config['namespace']} -- \
+            curl -s -o /dev/null -w '%{{http_code}}' http://{cluster_ip}:{config['port']}/api/version 2>/dev/null"""
+
+        api_result = run_command(api_cmd, timeout=20)
+
+        if ok(api_result):
+            http_code = api_result["stdout"].strip().split()[-1] if api_result["stdout"] else "000"
+            is_accessible = http_code in ["200", "401", "403"]  # 401/403 means API is up but needs auth
+
             tests.append(create_test_result(
-                "argocd_cli_login",
-                "ArgoCD CLI login test",
-                True,
-                f"✓ Successfully logged in",
-                "info"
+                "argocd_api_version",
+                "ArgoCD API endpoint test",
+                is_accessible,
+                f"{'✓' if is_accessible else '✗'} API responded with HTTP {http_code}",
+                "info" if is_accessible else "warning"
             ))
         else:
             tests.append(create_test_result(
-                "argocd_cli_login",
-                "ArgoCD CLI login test",
+                "argocd_api_version",
+                "ArgoCD API endpoint test",
                 False,
-                f"✗ Login failed: {login_result['stderr'] or login_result['stdout']}",
+                f"✗ API test failed: {api_result.get('stderr', 'Unknown error')}",
                 "warning"
             ))
     else:
         tests.append(create_test_result(
-            "argocd_cli_available",
-            "ArgoCD CLI availability in stack-agent",
+            "argocd_api_accessible",
+            "ArgoCD API service accessibility",
             False,
-            f"✗ ArgoCD CLI not found in stack-agent",
+            f"✗ ArgoCD server service not found",
             "warning"
         ))
-    
+
     return tests
 
 
@@ -488,10 +492,10 @@ def test_argocd() -> List[Dict[str, Any]]:
     
     # 5) Logs
     results.extend(check_application_logs(time_window_minutes=5))
-    
-    # 6) CLI access (optional)
-    results.extend(check_argocd_cli_access())
-    
+
+    # 6) API access (using kubectl/curl, no argocd CLI needed)
+    results.extend(check_argocd_api_access())
+
     # 7) Generate summary
     summary = generate_summary(results)
     results.append(summary)
