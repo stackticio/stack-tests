@@ -1,7 +1,5 @@
 
 # test_keycloak.py - Smart Keycloak testing with database validation
-{% raw %}
-
 import os
 from typing import List, Dict
 
@@ -274,4 +272,3 @@ def get_keycloak_tests() -> List[Dict]:
     })
     
     return tests
-{% endraw %}
