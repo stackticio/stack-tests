@@ -106,25 +106,30 @@ def detect_apisix_crd_names() -> Dict[str, str]:
         'upstream': UPSTREAM_CRD,
         'tls': TLS_CRD
     }
-    
+
     # Try to detect actual CRD names
     cmd = "kubectl get crd | grep -i apisix"
     result = run_command(cmd)
-    
+
     if ok(result) and result['stdout']:
         lines = result['stdout'].lower().split('\n')
         for line in lines:
-            if 'route' in line and 'apisix' in line:
+            # Be specific to avoid matching wrong CRDs (e.g., httproutepolicies)
+            if 'apisixroute' in line:
                 crd_name = line.split()[0]
                 # Extract the resource name (e.g., apisixroutes.apisix.apache.org -> apisixroute)
-                crds['route'] = crd_name.split('.')[0].rstrip('s')
-            elif 'upstream' in line and 'apisix' in line:
+                # Remove trailing 's' only if present (don't use rstrip which removes all trailing 's')
+                name = crd_name.split('.')[0]
+                crds['route'] = name[:-1] if name.endswith('s') else name
+            elif 'apisixupstream' in line:
                 crd_name = line.split()[0]
-                crds['upstream'] = crd_name.split('.')[0].rstrip('s')
-            elif 'tls' in line and 'apisix' in line:
+                name = crd_name.split('.')[0]
+                crds['upstream'] = name[:-1] if name.endswith('s') else name
+            elif 'apisixtls' in line:
                 crd_name = line.split()[0]
-                crds['tls'] = crd_name.split('.')[0].rstrip('s')
-    
+                name = crd_name.split('.')[0]
+                crds['tls'] = name[:-1] if name.endswith('s') else name
+
     return crds
 
 def detect_loadbalancer_service() -> str:
