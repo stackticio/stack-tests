@@ -24,7 +24,6 @@ import sys
 import time
 import tempfile
 import uuid
-import shlex
 from typing import List, Dict, Optional, Tuple
 
 
@@ -96,9 +95,13 @@ def setup_mc_alias() -> Dict:
     """Setup MinIO client alias for SeaweedFS (S3-compatible)"""
     config = get_seaweedfs_config()
 
-    # Setup mc alias
-    cmd = f"mc alias set seaweedfs http://{config['host']}:{config['port']} {shlex.quote(config['access_key'])} {shlex.quote(config['secret_key'])} --api S3v4 2>&1"
-    result = run_command(cmd, timeout=10)
+    # Setup mc alias using env vars to avoid shell escaping issues
+    env = os.environ.copy()
+    env['ADMIN_ACCESS_KEY'] = config['access_key']
+    env['ADMIN_SECRET_KEY'] = config['secret_key']
+
+    cmd = f'mc alias set seaweedfs http://{config["host"]}:{config["port"]} "$ADMIN_ACCESS_KEY" "$ADMIN_SECRET_KEY" --api S3v4 2>&1'
+    result = run_command(cmd, env=env, timeout=10)
 
     return create_test_result(
         "seaweedfs_mc_setup",
@@ -205,8 +208,11 @@ def test_seaweedfs_buckets() -> List[Dict]:
                 if bucket_info.get("access_key") and bucket_info.get("secret_key"):
                     # Setup alias with bucket-specific credentials
                     alias_name = f"seaweedfs_{bucket_name}"
-                    cmd = f"mc alias set {alias_name} http://{config['host']}:{config['port']} {shlex.quote(bucket_info['access_key'])} {shlex.quote(bucket_info['secret_key'])} --api S3v4 2>&1"
-                    alias_result = run_command(cmd, timeout=10)
+                    env = os.environ.copy()
+                    env['BUCKET_ACCESS_KEY'] = bucket_info['access_key']
+                    env['BUCKET_SECRET_KEY'] = bucket_info['secret_key']
+                    cmd = f'mc alias set {alias_name} http://{config["host"]}:{config["port"]} "$BUCKET_ACCESS_KEY" "$BUCKET_SECRET_KEY" --api S3v4 2>&1'
+                    alias_result = run_command(cmd, env=env, timeout=10)
 
                     if alias_result["exit_code"] == 0 or "already exists" in alias_result["stdout"]:
                         # Test write
