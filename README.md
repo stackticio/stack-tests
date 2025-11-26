@@ -1,8 +1,342 @@
-# Testing Script Development Guide
+# Stack Testing Framework
+
+> **Automated, metadata-driven testing for Kubernetes infrastructure components**
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Architecture: Stacktic → Stack Agent → Tests](#architecture-stacktic--stack-agent--tests)
+3. [How It Works](#how-it-works)
+4. [Multi-Resource ENV Format](#multi-resource-env-format)
+5. [Test Development Guide](#test-development-guide)
+6. [Examples](#examples)
+
+---
 
 ## Overview
 
-This guide explains how to write test scripts that integrate with our testing API. All test scripts must follow a standardized JSON output format.
+This testing framework **automatically discovers and tests infrastructure components** deployed via Stacktic templates. The key innovation is that **tests are automatically customized** based on actual deployed resources - no manual configuration needed.
+
+**Key Features:**
+- 🔍 **Auto-Discovery**: Finds components from environment variables
+- 📦 **Multi-Resource Testing**: Tests all databases, queues, buckets per component
+- 🎯 **Dynamic Generation**: Tests adapt to deployed resources
+- 🏗️ **Metadata-Driven**: Leverages Stacktic component information
+- 🌐 **Cross-Stack Ready**: Can test components across multiple stacks
+
+**The Problem We Solve:**
+
+Traditional testing requires manually writing tests for each deployed component:
+```python
+# ❌ Manual approach - breaks when configuration changes
+test_mongodb_db1()
+test_mongodb_db2()
+test_kafka_topic1()
+test_kafka_topic2()
+```
+
+Our approach auto-generates tests from metadata:
+```python
+# ✅ Automated approach - adapts to configuration
+for db in parse_databases_from_env():
+    test_mongodb_connection(db)
+for topic in parse_topics_from_env():
+    test_kafka_topic(topic)
+```
+
+---
+
+## Architecture: Stacktic → Stack Agent → Tests
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                    STACKTIC TESTING ARCHITECTURE                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Step 1: Template Generation (Stacktic)
+┌─────────────────────────────────────┐
+│  Stacktic Templates                 │
+│  (/Users/.../dev/templates/)        │
+│                                     │
+│  ├─ mongodb/                        │
+│  │  └─ Generates cloud.env:         │
+│  │     MONGODB_HOST=...             │
+│  │     MONGODB_DATABASES=           │
+│  │       "db1:user1:pass1:...;      │
+│  │        db2:user2:pass2:..."      │
+│  │                                  │
+│  ├─ kafka/                          │
+│  │  └─ Generates cloud.env:         │
+│  │     KAFKA_HOST=...               │
+│  │     KAFKA_TOPICS="topic1,..."    │
+│  │                                  │
+│  └─ stack_agent/                    │
+│     └─ Embeds test files from       │
+│        this repository              │
+└─────────────────────────────────────┘
+            │
+            ▼
+Step 2: Stack Agent Deployment
+┌─────────────────────────────────────┐
+│  Stack Agent Pod (Kubernetes)       │
+│                                     │
+│  ┌───────────────────────────────┐ │
+│  │  Component Discovery          │ │
+│  │  (from ENV variables)         │ │
+│  │                               │ │
+│  │  Scans for: *_HOST            │ │
+│  │  Finds: MONGODB_HOST,         │ │
+│  │         KAFKA_HOST,           │ │
+│  │         RABBITMQ_HOST         │ │
+│  └────────────┬──────────────────┘ │
+│               │                     │
+│               ▼                     │
+│  ┌───────────────────────────────┐ │
+│  │  Test Definition Loader       │ │
+│  │                               │ │
+│  │  Loads: test_mongodb.py       │ │
+│  │         test_kafka.py         │ │
+│  │         test_rabbitmq.py      │ │
+│  └────────────┬──────────────────┘ │
+│               │                     │
+│               ▼                     │
+│  ┌───────────────────────────────┐ │
+│  │  Dynamic Test Generator       │ │
+│  │                               │ │
+│  │  Parses multi-resource ENVs:  │ │
+│  │  MONGODB_DATABASES split by ; │ │
+│  │  → [db1, db2, db3]            │ │
+│  │                               │ │
+│  │  Generates test per resource  │ │
+│  └────────────┬──────────────────┘ │
+└───────────────┼────────────────────┘
+                │
+                ▼
+Step 3: Test Execution
+┌─────────────────────────────────────┐
+│  Test Scripts (This Repository)    │
+│  (/Users/.../dev/stack-tests/)     │
+│                                     │
+│  components/test_mongodb.py         │
+│    ├─ Parses MONGODB_DATABASES     │
+│    ├─ Generates connectivity test  │
+│    │  for EACH database            │
+│    ├─ Generates collection test    │
+│    │  for EACH collection          │
+│    └─ Returns JSON results          │
+│                                     │
+│  components/test_kafka.py           │
+│    ├─ Parses KAFKA_TOPICS          │
+│    ├─ Tests EACH topic             │
+│    └─ Returns JSON results          │
+└─────────────────────────────────────┘
+                │
+                ▼
+Step 4: Results
+┌─────────────────────────────────────┐
+│  JSON Test Results                  │
+│                                     │
+│  [                                  │
+│    {                                │
+│      "name": "mongodb_db1_connect", │
+│      "status": true,                │
+│      "severity": "INFO"             │
+│    },                               │
+│    {                                │
+│      "name": "kafka_topic1_check",  │
+│      "status": true,                │
+│      "severity": "INFO"             │
+│    }                                │
+│  ]                                  │
+└─────────────────────────────────────┘
+```
+
+---
+
+## How It Works
+
+### 1. Stacktic Generates Component Metadata
+
+When templates are rendered, Stacktic generates **structured environment variables** encoding component information:
+
+**MongoDB Template** (`templates/mongodb/`):
+```jinja2
+{# Collect all database sub-components #}
+{% set __database = [] %}
+{% for sub_comp in cookiecutter.sub_components.values() %}
+  {% if sub_comp.type == "database" %}
+    {{ __database.append(sub_comp) }}
+  {% endif %}
+{% endfor %}
+
+{# Generate ENV with multiple databases #}
+MONGODB_DATABASES="
+{%- for db in __database -%}
+  {%- if not loop.first %};{% endif -%}
+  {{ db.name }}:{{ db.attributes.username }}:{{ db.attributes.password }}:{{ db.attributes.auth_database }}:{{ db.attributes.collection }}
+{%- endfor -%}"
+```
+
+**Generated ENV (`cloud.env`):**
+```bash
+MONGODB_HOST=mongodb-mongos.mongodb.svc.cluster.local
+MONGODB_PORT=27017
+MONGODB_CLUSTER_ADMIN_PASSWORD=abc123
+MONGODB_DATABASES="orders:orders_user:pass1:admin:transactions;users:users_user:pass2:admin:profiles;logs:logs_user:pass3:admin:events"
+```
+
+### 2. Stack Agent Discovers Components
+
+Stack Agent scans environment variables to find components:
+
+```python
+# From stack_agent template: stack_test_definitions.py
+def discover_components_from_env() -> List[str]:
+    """Discovers components from _HOST environment variables"""
+    components = set()
+
+    for key in os.environ:
+        if '_HOST' in key:
+            # MONGODB_HOST → mongodb
+            # KAFKA_HOST → kafka
+            # RABBITMQ_RABBITMQ_HOST → rabbitmq
+            component = key.replace('_HOST', '').lower().split('_')[0]
+            components.add(component)
+
+    return sorted(list(components))
+
+# Result: ['mongodb', 'kafka', 'rabbitmq']
+```
+
+### 3. Tests Parse Multi-Resource ENVs
+
+Each test file parses the structured ENV to extract resources:
+
+```python
+# From components/test_mongodb.py
+def parse_databases() -> List[Dict[str, str]]:
+    """
+    Parse MONGODB_DATABASES environment variable
+    Format: db1:user1:pass1:authdb1:collection1;db2:user2:pass2:authdb2:collection2
+    """
+    databases = []
+    databases_env = os.getenv('MONGODB_DATABASES', '')
+
+    for db_config in databases_env.split(';'):
+        if db_config.strip():
+            parts = db_config.strip().split(':')
+            if len(parts) >= 5:
+                databases.append({
+                    'database': parts[0],
+                    'username': parts[1],
+                    'password': parts[2],
+                    'auth_database': parts[3],
+                    'collection': parts[4]
+                })
+
+    return databases
+
+# Result: [
+#   {'database': 'orders', 'username': 'orders_user', 'password': 'pass1', ...},
+#   {'database': 'users', 'username': 'users_user', 'password': 'pass2', ...},
+#   {'database': 'logs', 'username': 'logs_user', 'password': 'pass3', ...}
+# ]
+```
+
+### 4. Tests Generated Per Resource
+
+For **each database**, generate specific tests:
+
+```python
+def check_database_auth() -> List[Dict[str, Any]]:
+    """Test authentication for each configured database"""
+    tests = []
+
+    for db in DATABASES:
+        # Connectivity test for THIS database
+        tests.append({
+            'name': f'mongodb_{db["database"]}_connectivity',
+            'description': f'Test {db["database"]} connectivity',
+            'command': 'mongosh',
+            'args': [
+                f'--host={MONGO_HOST}:{MONGO_PORT}',
+                f'--username={db["username"]}',
+                f'--password={db["password"]}',
+                f'--authenticationDatabase={db["auth_database"]}',
+                '--eval', f'db.getSiblingDB("{db["database"]}").runCommand({{ ping: 1 }})'
+            ],
+            'timeout': 30,
+            'severity': 'CRITICAL'
+        })
+
+        # Collection test for THIS database
+        tests.append({
+            'name': f'mongodb_{db["database"]}_collection_{db["collection"]}',
+            'description': f'Check {db["collection"]} exists in {db["database"]}',
+            'command': 'mongosh',
+            'args': [...],  # Check collection
+            'timeout': 30,
+            'severity': 'WARNING'
+        })
+
+    return tests
+
+# Result: 6 tests total (2 tests × 3 databases)
+```
+
+---
+
+## Multi-Resource ENV Format
+
+### Supported Component Types
+
+| Component | ENV Variable | Format |
+|-----------|-------------|--------|
+| **MongoDB** | `MONGODB_DATABASES` | `db:user:pass:authdb:collection;...` |
+| **PostgreSQL/CNPG** | `POSTGRES_DATABASES` | `name:user:pass:database;...` |
+| **RabbitMQ** | `RABBITMQ_QUEUES` | `queue1,queue2,...` |
+| | `RABBITMQ_EXCHANGES` | `exchange1,exchange2,...` |
+| **MinIO** | `MINIO_BUCKETS` | `name:bucket:accesskey:secretkey;...` |
+| **Kafka** | `KAFKA_TOPICS` | `topic1,topic2,...` |
+
+### Format Examples
+
+**MongoDB:**
+```bash
+MONGODB_DATABASES="orders:ord_user:pass1:admin:txns;users:usr_user:pass2:admin:profiles"
+```
+
+**PostgreSQL:**
+```bash
+POSTGRES_DATABASES="app1:app1_user:pass1:app1_db;app2:app2_user:pass2:app2_db"
+```
+
+**RabbitMQ:**
+```bash
+RABBITMQ_QUEUES="orders.new,orders.processed,users.created"
+RABBITMQ_EXCHANGES="orders,users,notifications"
+```
+
+**MinIO:**
+```bash
+MINIO_BUCKETS="models:ml-models:minio-access-key:minio-secret-key;logs:app-logs:log-access:log-secret"
+```
+
+### Why This Format?
+
+1. **Single ENV Variable**: All resources in one place
+2. **Parseable**: Simple split operations (`;` for records, `:` for fields)
+3. **Complete Information**: Includes credentials, namespaces, collections
+4. **Generated Automatically**: Templates create this from sub-components
+5. **No Manual Updates**: Adding/removing resources updates tests automatically
+
+---
+
+## Test Development Guide
+
+This guide explains how to write test scripts that integrate with the testing framework. All test scripts must follow a standardized JSON output format.
 
 ## Basic Structure Requirements
 
@@ -323,4 +657,85 @@ def test_authenticated_endpoint() -> Dict:
 
 ---
 
-**That's it!** Follow this structure and your script will integrate seamlessly with the testing API.
+## Cross-Stack Testing (Future Enhancement)
+
+### Current State: Single Stack
+
+Currently, Stack Agent tests components within a single stack using ENV-based discovery.
+
+### Future: Multi-Stack Testing with `is_referenced`
+
+Stack Agent templates **could leverage** Stacktic's global component registry (similar to Grafana multi-stack dashboards) to enable cross-stack testing:
+
+```python
+# Potential enhancement in stack_agent template
+
+# Access global component registry
+{% for comp_name, comp in cookiecutter.components.items() %}
+  {% if comp.is_referenced %}
+    # This is a remote component from another stack
+    # Generate connectivity/health tests (read-only)
+
+    # Example: Remote MongoDB from stack-2
+    STACK_2_MONGODB_HOST={{ comp.attributes.host }}
+    STACK_2_MONGODB_PORT={{ comp.attributes.port }}
+    STACK_2_MONGODB_REMOTE=true  # Flag for limited testing
+  {% endif %}
+{% endfor %}
+```
+
+### Use Case: Centralized Testing from SRE Stack
+
+```
+SRE Stack (Testing Hub)
+      │
+      ├─ Stack Agent Pod
+      │    │
+      │    ├─ Local Components:
+      │    │   - prometheus-master (full tests)
+      │    │   - grafana (full tests)
+      │    │
+      │    ├─ Remote Components (is_referenced: true):
+      │    │   - stack-2-prometheus (connectivity tests)
+      │    │   - stack-2-mongodb (health checks)
+      │    │   - stack-3-kafka (topic verification)
+      │    │
+      │    └─ Generated Tests:
+      │        ├─ Local: Full access tests
+      │        └─ Remote: Connectivity + health tests
+      │
+      └─ Single dashboard showing all stack health
+```
+
+### Benefits
+
+- **Centralized Testing**: One Stack Agent tests multiple stacks
+- **Auto-Discovery**: No manual configuration for remote components
+- **Dynamic Updates**: Adding/removing stacks automatically updates tests
+- **Cross-Stack Validation**: Verify cross-stack connections (remote_write, federation)
+
+---
+
+## Related Documentation
+
+- **Stacktic Templates** (`/Users/.../dev/templates/`):
+  - See `AI-README.md` - Multi-stack architecture overview
+  - See `TEMPLATING-GUIDE.md` - Global component registry (`is_referenced`)
+  - See `grafana/README.md` - Multi-stack dashboard example
+  - See `stack_agent/AI-README.md` - Stack Agent architecture
+
+- **Multi-Stack Concepts**:
+  - `cookiecutter.components` - Global registry across all stacks
+  - `is_referenced: true` - Marks components from other stacks
+  - `links_from` / `links_to` - Cross-stack relationships
+
+---
+
+**That's it!** Follow this structure and your script will integrate seamlessly with the testing framework.
+
+**Key Takeaways:**
+- ✅ Tests auto-discover components from ENV variables
+- ✅ Tests auto-customize based on deployed resources
+- ✅ Templates generate the ENV format automatically
+- ✅ Stack Agent orchestrates discovery and execution
+- ✅ Cross-stack testing possible via global component registry
