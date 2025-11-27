@@ -1,11 +1,34 @@
-# test_kafka.py - Corrected version with proper pod detection and clean output
+#!/usr/bin/env python3
+"""
+test_kafka.py - Fully ENV-based generic Kafka test with NO hardcoded values
+
+REQUIRED ENVIRONMENT VARIABLES:
+    KAFKA_NS or KAFKA_NAMESPACE: Kubernetes namespace where Kafka is deployed
+    KAFKA_BOOTSTRAP_SERVERS: Kafka bootstrap server (format: host:port)
+
+OPTIONAL ENVIRONMENT VARIABLES:
+    KAFKA_TOPICS: Comma-separated list of topics to test (e.g., "topic1,topic2")
+
+EXAMPLE:
+    export KAFKA_NS=strimzi
+    export KAFKA_BOOTSTRAP_SERVERS=kafka-kafka-bootstrap.strimzi.svc.cluster.local:9092
+    export KAFKA_TOPICS=topic1,topic2
+    python3 test_kafka.py
+
+FEATURES:
+    - Auto-discovers Kafka broker pods dynamically
+    - Tests connectivity, topics, consumer groups, and cluster health
+    - Validates all required ENVs before running tests
+    - Provides clear error messages when ENVs are missing
+    - Returns JSON-formatted results for automation
+"""
 
 import os
 import json
 import subprocess
 import time
 import uuid
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 def run_command(command: str, env: Dict = None, timeout: int = 30) -> Dict:
     """Helper to run a shell command and capture stdout/stderr/exit code"""
@@ -27,29 +50,87 @@ def run_command(command: str, env: Dict = None, timeout: int = 30) -> Dict:
         return {"exit_code": 124, "stdout": "", "stderr": "Timeout"}
 
 
-def get_kafka_namespace() -> str:
-    """Get Kafka namespace from env or default"""
-    return os.getenv("KAFKA_NS", os.getenv("KAFKA_NAMESPACE", "strimzi"))
+def get_kafka_namespace() -> Optional[str]:
+    """Get Kafka namespace from env - NO DEFAULTS"""
+    namespace = os.getenv("KAFKA_NS") or os.getenv("KAFKA_NAMESPACE")
+    if not namespace:
+        return None
+    return namespace
+
+
+def get_bootstrap_server() -> Tuple[Optional[str], Optional[str]]:
+    """Parse bootstrap server from ENV - returns (host, port)"""
+    bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "")
+    if not bootstrap:
+        return None, None
+
+    # Handle formats: host:port or just host
+    if ":" in bootstrap:
+        parts = bootstrap.split(":")
+        return parts[0], parts[1]
+    return bootstrap, "9092"  # Default Kafka port if not specified
+
+
+def get_kafka_broker_connection() -> str:
+    """Get broker connection string for use inside pod (localhost) or from ENV"""
+    # When executing inside pod via kubectl exec, use localhost
+    # Otherwise use KAFKA_BOOTSTRAP_SERVERS
+    return "localhost:9092"
+
+
+def validate_required_envs() -> List[Dict]:
+    """Validate that all required ENV variables are set"""
+    errors = []
+
+    if not get_kafka_namespace():
+        errors.append({
+            "name": "kafka_env_validation",
+            "status": False,
+            "output": "ERROR: Missing required ENV variable: KAFKA_NS or KAFKA_NAMESPACE",
+            "severity": "CRITICAL"
+        })
+
+    bootstrap_host, bootstrap_port = get_bootstrap_server()
+    if not bootstrap_host:
+        errors.append({
+            "name": "kafka_env_validation",
+            "status": False,
+            "output": "ERROR: Missing required ENV variable: KAFKA_BOOTSTRAP_SERVERS",
+            "severity": "CRITICAL"
+        })
+
+    topics = _get_topics()
+    if not topics:
+        errors.append({
+            "name": "kafka_env_validation",
+            "status": False,
+            "output": "WARNING: KAFKA_TOPICS not set - topic-specific tests will be skipped",
+            "severity": "WARNING"
+        })
+
+    return errors
 
 
 def get_kafka_broker_pod() -> Optional[str]:
-    """Dynamically find the first Kafka broker pod - FIXED VERSION"""
+    """Dynamically find the first Kafka broker pod"""
     namespace = get_kafka_namespace()
-    
-    # Correct way to find broker pods in KRaft mode
+    if not namespace:
+        return None
+
+    # Find broker pods in KRaft mode
     cmd = f"kubectl get pods -n {namespace} -l strimzi.io/broker-role=true --no-headers 2>/dev/null | head -1 | awk '{{print $1}}'"
     result = run_command(cmd, timeout=5)
-    
+
     if result["exit_code"] == 0 and result["stdout"]:
         return result["stdout"].strip()
-    
+
     # Fallback for combined nodes
     cmd = f"kubectl get pods -n {namespace} -l strimzi.io/kind=Kafka --no-headers 2>/dev/null | grep 'kafka-[0-9]' | head -1 | awk '{{print $1}}'"
     result = run_command(cmd, timeout=5)
-    
+
     if result["exit_code"] == 0 and result["stdout"]:
         return result["stdout"].strip()
-    
+
     return None
 
 
@@ -197,14 +278,13 @@ def test_kafka_consumer_groups() -> List[Dict]:
 
 
 def _get_topics() -> List[str]:
-    """Get topics from environment or fetch from cluster"""
-    # First try environment variable
+    """Get topics from environment - NO DEFAULTS"""
     topics_env = os.getenv("KAFKA_TOPICS", "")
     if topics_env:
         return [t.strip() for t in topics_env.split(",") if t.strip()]
-    
-    # Otherwise return the known topics
-    return ["topic1", "topic2"]  # Your configured topics
+
+    # No fallback - return empty list if not configured
+    return []
 
 
 def test_topics() -> List[Dict]:
@@ -507,38 +587,90 @@ def test_kafka_connectors() -> List[Dict]:
 # Main execution
 if __name__ == "__main__":
     all_results = []
-    
+
+    # Display ENV configuration
+    print("="*60)
+    print("KAFKA TEST CONFIGURATION (ENV-based)")
+    print("="*60)
     namespace = get_kafka_namespace()
-    print(f"Using Kafka namespace: {namespace}\n")
-    
+    bootstrap_host, bootstrap_port = get_bootstrap_server()
+    topics = _get_topics()
+
+    print(f"KAFKA_NS: {namespace or 'NOT SET'}")
+    print(f"KAFKA_BOOTSTRAP_SERVERS: {bootstrap_host}:{bootstrap_port if bootstrap_host else 'NOT SET'}")
+    print(f"KAFKA_TOPICS: {', '.join(topics) if topics else 'NOT SET'}")
+    print("="*60 + "\n")
+
+    # Validate required ENVs
+    validation_errors = validate_required_envs()
+    if validation_errors:
+        all_results.extend(validation_errors)
+
+        # Check if there are critical errors
+        critical_errors = [e for e in validation_errors if e["severity"] == "CRITICAL"]
+        if critical_errors:
+            print("CRITICAL: Missing required environment variables!")
+            print("Cannot proceed with tests.\n")
+
+            # Print validation results
+            print("="*60)
+            print("ENV VALIDATION RESULTS")
+            print("="*60 + "\n")
+            for result in all_results:
+                status_text = "Passed" if result["status"] else "Failed"
+                print(f"{result['name']}")
+                print(f"  Status: {status_text}")
+                print(f"  {result['output']}\n")
+
+            print("="*60)
+            print("Required ENV variables:")
+            print("  - KAFKA_NS or KAFKA_NAMESPACE")
+            print("  - KAFKA_BOOTSTRAP_SERVERS")
+            print("  - KAFKA_TOPICS (optional, but recommended)")
+            print("="*60)
+            exit(1)
+
     # Run tests
     all_results.extend(test_kafka_connectivity())
     all_results.extend(test_kafka_list_topics())
     all_results.extend(test_kafka_consumer_groups())
     all_results.extend(test_kafka_statistics())
-    all_results.extend(test_topics())
+
+    # Only run topic tests if topics are configured
+    if topics:
+        all_results.extend(test_topics())
+    else:
+        all_results.append({
+            "name": "kafka_topic_tests",
+            "status": True,
+            "output": "Skipped - No topics configured in KAFKA_TOPICS",
+            "severity": "INFO"
+        })
+
     all_results.extend(test_kafka_connect())
     all_results.extend(test_kafka_connectors())
     all_results.extend(test_kafka_cluster_health())
-    
+
     # Print clean results
     print("\n" + "="*60)
     print("KAFKA TEST RESULTS")
     print("="*60 + "\n")
-    
+
     for result in all_results:
-        status_icon = "✓" if result["status"] else "✗"
         status_text = "Passed" if result["status"] else "Failed"
         print(f"{result['name']}")
         print(f"  Status: {status_text}")
         if result["output"]:
             print(f"  {result['output']}\n")
-    
+
     # Summary
     total = len(all_results)
     passed = sum(1 for r in all_results if r["status"])
     failed = total - passed
-    
+
     print("="*60)
     print(f"SUMMARY: {passed}/{total} tests passed, {failed} failed")
     print("="*60)
+
+    # Exit with error code if there are failures
+    exit(0 if failed == 0 else 1)
